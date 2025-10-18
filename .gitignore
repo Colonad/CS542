@@ -1,0 +1,69 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.dist/
+build/
+dist/
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+conda-env/
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# -------------------------
+# Project data & outputs
+# -------------------------
+# Raw and interim data (keep structure via .gitkeep)
+data/raw/*
+data/interim/*
+
+# But keep .gitkeep files so folders exist in git
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+
+# Outputs (metrics/models/preds/figures)
+outputs/**/*
+!outputs/.gitkeep
+!outputs/metrics/.gitkeep
+!outputs/models/.gitkeep
+!outputs/preds/.gitkeep
+!outputs/figures/.gitkeep
+
+# Allow small README stubs if you added them
+!outputs/metrics/README.md
+!outputs/models/README.md
+!outputs/preds/README.md
+!outputs/figures/README.md
+!data/interim/README.md
+
+# Model binaries & large artifacts (redundant with above, explicit here)
+*.pkl
+*.joblib
+*.parquet
+*.zip
+
+# -------------------------
+# Kaggle credentials (never commit secrets)
+# -------------------------
+kaggle.json
+.kaggle/
