@@ -38,8 +38,9 @@ data/raw/*
 data/interim/*
 
 # But keep .gitkeep files so folders exist in git
+# Keep these tracked
+!data/raw/usa_real_estate.csv
 !data/raw/.gitkeep
-!data/interim/.gitkeep
 
 # Outputs (metrics/models/preds/figures)
 outputs/**/*
