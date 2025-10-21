@@ -35,7 +35,7 @@ Thumbs.db
 # -------------------------
 # Raw and interim data (keep structure via .gitkeep)
 data/raw/*
-data/interim/*
+!data/raw/.gitkeep
 
 # But keep .gitkeep files so folders exist in git
 !data/raw/.gitkeep
