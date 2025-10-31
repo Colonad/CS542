@@ -68,9 +68,3 @@ outputs/**/*
 # -------------------------
 kaggle.json
 .kaggle/
-
-# Training artifacts
-runs/**/model_*.pt
-runs/**/model_*.ckpt
-*.pt
-*.ckpt
