@@ -57,6 +57,37 @@ def load_data(
     # Normalize column names
     df.columns = [c.strip().lower() for c in df.columns]
 
+
+
+    # --- Normalize location/category columns to strings; fix ZIP codes
+    for col in ("city", "state", "zip_code"):
+        if col in df.columns:
+            if col == "zip_code":
+                z = df[col]
+                # Coerce numeric to string safely; preserve strings
+                if pd.api.types.is_numeric_dtype(z):
+                    z = pd.to_numeric(z, errors="coerce").astype("Int64").astype(str)
+                else:
+                    z = z.astype(str)
+                # Clean and normalize: strip, drop "<NA>", remove non-digits, drop '.0'
+                z = (
+                    z.str.strip()
+                     .str.replace("<NA>", "", regex=False)
+                     .str.replace(r"\.0$", "", regex=True)
+                     .str.replace(r"[^\d]", "", regex=True)
+                )
+                # US-style normalization: pad 1–5 digit strings to 5 digits
+                z = z.where(~z.str.fullmatch(r"\d{1,5}"), z.str.zfill(5))
+                df[col] = z
+            else:
+                df[col] = df[col].astype(str).str.strip()
+
+
+
+
+
+
+
     # --- Alias map (rename common variants to canonical names)
     alias_map = {
         "sold_date": [
@@ -90,11 +121,11 @@ def load_data(
         df, src = _autodetect_sold_date(df)
         cols_set = set(df.columns)
 
-    # --- Parse dates (after aliasing/auto-detect)
+    # --- Parse dates (after aliasing/auto-detect) — quiet, consistent
     wanted_date_cols = set(cfg_parse_dates) | {"sold_date", "prev_sold_date"}
     for dcol in wanted_date_cols:
         if dcol in df.columns:
-            df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
+            df[dcol] = _coerce_datetime_quiet(df[dcol])
 
     # Replace ±inf with NaN
     df = df.replace([np.inf, -np.inf], np.nan)

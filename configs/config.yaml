@@ -1,5 +1,5 @@
 # ==============================================================================
-# Real Estate Price Prediction — Master Config
+# Real Estate Price Prediction — Master Config (Phase 4)
 # ==============================================================================
 
 # ---------------------------- #
@@ -12,7 +12,7 @@ paths:
 
 run:
   run_name: null                  # if null, auto: YYYY-MM-DD_HHMMSS
-  timestamped_outputs: true       # if true, mirror metrics/preds/models into outputs/run/<stamp>/
+  timestamped_outputs: true       # mirror metrics/preds/models into outputs/run/<stamp>/
   save_config_snapshot: true      # copy this yaml into the run folder
   random_state: 0
   n_jobs: -1                      # threads for models that support it
@@ -26,17 +26,19 @@ data:
   parse_dates: ["sold_date", "prev_sold_date"]
   drop_inf: true
   drop_na_target: true
+
   # broad guards (do not overfit here; just remove clearly impossible values)
   filters:
     price:
       min: 1000
       max: 10000000
     house_size:
-      min: 100           # optional; only applied if column exists
+      min: 100             # optional; only applied if column exists
       max_percentile: 99.9
     acre_lot:
       min: 0
       max_percentile: 99.9
+
   export_schema_snapshot: true     # write schema snapshot to data/interim/schema.snapshot.json
 
 # ---------------------------- #
@@ -44,7 +46,7 @@ data:
 # ---------------------------- #
 target:
   name: price
-  log_transform: true             # model log1p(price); inverse with expm1 for reporting
+  log_transform: true              # model log1p(price); inverse with expm1 for reporting
 
 # ---------------------------- #
 # Feature configuration
@@ -56,8 +58,8 @@ features:
 
   # Automatically derived (no leakage; derived from a single row)
   derived:
-    enable_basic_time: true       # adds year, month
-    enable_years_since_prev: true # (sold - prev_sold)/365.25; impute if prev missing
+    enable_basic_time: true        # adds year, month
+    enable_years_since_prev: true  # (sold - prev_sold)/365.25; impute if prev missing
 
   # Optional engineered features computed row-wise
   engineered:
@@ -71,7 +73,7 @@ features:
   # Neighborhood/aggregate stats fit on TRAIN ONLY (then merged to val/test)
   leakage_safe_neighbors:
     enabled: true
-    group_keys: [zip_code, year]  # must be in dataframe
+    group_keys: [zip_code, year]   # must be present in dataframe
     stats:
       - kind: median
         of: price
@@ -87,15 +89,25 @@ features:
     upper_pct: 99.5
 
 # ---------------------------- #
-# Split protocol
+# Split protocol (Phase 3)
 # ---------------------------- #
 split:
   # 2-way temporal split (train < cutoff, test >= cutoff)
   cutoff: "2023-01-01"
+
   # Optional 3-way split: if provided, val = [cutoff, val_cutoff), test >= val_cutoff
-  val_cutoff: null
-  # If a stable property ID exists, you can forbid property leakage across splits
-  property_id_col: null           # e.g., "prop_id" (if you build one)
+  val_cutoff: null                 # e.g., "2024-01-01" to enable 3-way split
+
+  # (Optional) enforce no cross-property leakage if you have a stable property ID
+  property_id_col: null            # e.g., "prop_id"
+  forbid_property_cross_split: false
+
+  # (Optional) guardrails
+  min_train_rows: 10000            # assert there’s sufficient train data
+  min_test_rows: 100               # assert there’s sufficient test data
+
+  # (Optional) pin evaluation geography by ZIP prefix (kept off by default)
+  restrict_test_zip_prefixes: []   # e.g., ["10", "11"]
 
 # ---------------------------- #
 # Cross-validation (optional)
@@ -104,7 +116,7 @@ cv:
   enabled: false
   kind: time_series               # 'time_series' | 'kfold'
   n_splits: 3
-  gap: 0                           # gap between train and val windows (in months) for time series
+  gap: 0                          # gap between train and val windows (months) for time series
   test_size_months: 6
 
 # ---------------------------- #
@@ -114,6 +126,7 @@ baselines:
   median_zip_year:
     enabled: true
     group_cols: [zip_code, year]
+    min_group_size: 1             # baseline backoff gate; the function also falls back to zip/year/global
 
 # ---------------------------- #
 # Preprocessing
@@ -123,14 +136,15 @@ preprocess:
   categorical_imputer: most_frequent
   one_hot:
     handle_unknown: ignore
-    min_frequency: 50             # groups rare categories to keep matrix manageable
-  scaler: null                    # (not needed for tree models; set to 'standard' for linear if desired)
+    min_frequency: 50             # group rare categories to keep matrix manageable
+  scaler: null                    # set to 'standard' for linear models if desired
 
 # ---------------------------- #
 # Model registry & params
 # ---------------------------- #
 model:
-  kind: auto             # ridge | random_forest | xgboost | lightgbm (if installed)
+  # Choose exactly one of: ridge | random_forest | xgboost
+  kind: random_forest             # ← Default strong baseline. Switch to 'ridge' for linear or 'xgboost' if installed.
 
   ridge:
     alpha: 2.0
@@ -148,9 +162,8 @@ model:
     n_jobs: -1
     random_state: 0
 
-
   xgboost:
-    enabled: true
+    enabled: true                 # set false if xgboost is not available
     n_estimators: 1200
     max_depth: 8
     learning_rate: 0.05
@@ -158,21 +171,11 @@ model:
     colsample_bytree: 0.8
     reg_lambda: 1.0
     reg_alpha: 0.0
-    tree_method: auto
+    tree_method: auto             # will auto-switch to gpu_hist if GPU is detected by the code
     n_jobs: -1
     random_state: 0
     early_stopping:
       enabled: false              # turn on if you implement 3-way split with validation
-
-  lightgbm:
-    enabled: false                # set true if you add LightGBM to requirements
-    n_estimators: 1200
-    num_leaves: 127
-    learning_rate: 0.05
-    subsample: 0.8
-    colsample_bytree: 0.8
-    reg_lambda: 1.0
-    random_state: 0
 
 # ---------------------------- #
 # Training run behavior
@@ -194,15 +197,19 @@ eval:
     enabled: true
     group_cols: [state, zip_code]
     topk: 20
+    min_count: 10
 
   # Plots saved to outputs/figures/
   plots:
     pred_vs_actual: true
     residuals_vs_price: true
     feature_importance: true
-    calibration_curve: false
+    calibration_curve: true
 
-  # Export files
+  calibration:
+    bins: 20     # deciles=10, ventiles=20, etc.
+
+  # Export files (used by scripts; safe to keep on)
   exports:
     metrics_json: true
     summary_csv: true
@@ -210,7 +217,7 @@ eval:
     slices_json: true
 
 # ---------------------------- #
-# Interpretability 
+# Interpretability
 # ---------------------------- #
 interpretability:
   permutation_importance:

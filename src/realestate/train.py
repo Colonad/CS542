@@ -15,7 +15,12 @@ from joblib import dump as joblib_dump
 
 from . import io as io_mod
 from .split import temporal_split
-from .features import basic_time_feats, years_since_prev, apply_engineered, maybe_add_neighbors_via_cfg
+from .features import (
+    basic_time_feats,
+    years_since_prev,
+    apply_engineered,
+    maybe_add_neighbors_via_cfg,
+)
 from .baselines import median_by_zip_year
 from .modeling import preprocessor, make_model, describe_estimator
 
@@ -132,6 +137,27 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     for f in added_feats:
         if f in train_df.columns and f not in num_cols and pd.api.types.is_numeric_dtype(train_df[f]):
             num_cols.append(f)
+            
+
+    # Refilter features to those that:
+    #  - exist in BOTH train and test
+    #  - have at least one non-null in TRAIN (so imputers don't warn)
+    num_cols = [
+        c for c in num_cols
+        if (c in train_df.columns and c in test_df.columns and train_df[c].notna().any())
+    ]
+    cat_cols = [
+        c for c in cat_cols
+        if (c in train_df.columns and c in test_df.columns and train_df[c].notna().any())
+    ]
+
+    if not (num_cols or cat_cols):
+        raise ValueError(
+            "After split, no usable features remain (mismatch or all-NaN in train). "
+            "Consider disabling neighbors or adjusting configs.features."
+        )
+    p.step(f"Usable features post-split: num={len(num_cols)} cat={len(cat_cols)}")
+
 
 
 
