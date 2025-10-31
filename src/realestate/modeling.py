@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
+import os
+import subprocess
 
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -10,15 +12,41 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 
-__all__ = ["preprocessor", "make_model"]
+__all__ = ["preprocessor", "make_model", "describe_estimator"]
 
-# Try to import XGBoost (optional)
+# Optional XGBoost
 _HAS_XGB = False
 try:
     from xgboost import XGBRegressor  # type: ignore
     _HAS_XGB = True
 except Exception:
     _HAS_XGB = False
+
+
+# --------------------------------------------------------------------------- #
+# GPU availability probe (works well on Colab/servers)
+# --------------------------------------------------------------------------- #
+def _gpu_available() -> bool:
+    """
+    Heuristic GPU check:
+      1) CUDA_VISIBLE_DEVICES is set and not '-1'
+      2) 'nvidia-smi -L' returns at least one GPU
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cvd and cvd != "-1":
+        return True
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-L"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+        return (out.returncode == 0) and ("GPU" in (out.stdout or ""))
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -33,17 +61,14 @@ def preprocessor(
     """
     Build a leakage-safe preprocessing transformer:
 
-      - Numeric: SimpleImputer(strategy="median")
-      - Categorical: SimpleImputer(strategy="most_frequent")
-                     -> OneHotEncoder(handle_unknown="ignore", min_frequency=50)
+      - Numeric: SimpleImputer(strategy="median"|...)
+      - Categorical: SimpleImputer(strategy="most_frequent"|...) -> OneHotEncoder
 
-    Notes
-    -----
-    - If `cfg['preprocess']` is provided, we honor:
-        preprocess.numeric_imputer        ("median" | "mean" | "constant")
-        preprocess.categorical_imputer    ("most_frequent" | "constant")
-        preprocess.one_hot.min_frequency  (int | float)
-        preprocess.one_hot.handle_unknown ("ignore" | "infrequent_if_exist")  # sklearn>=1.4
+    Honors (if present in cfg['preprocess']):
+      - numeric_imputer: "median" | "mean" | "constant"
+      - categorical_imputer: "most_frequent" | "constant"
+      - one_hot.handle_unknown: "ignore" (default) | "infrequent_if_exist" (sklearn>=1.4)
+      - one_hot.min_frequency: int or float
     """
     p = (cfg or {}).get("preprocess", {}) if isinstance(cfg, Mapping) else {}
 
@@ -51,14 +76,12 @@ def preprocessor(
     num_strategy = p.get("numeric_imputer", "median")
     if num_strategy not in {"median", "mean", "constant"}:
         num_strategy = "median"
-
     num_imputer = SimpleImputer(strategy=num_strategy)
 
     # Categorical imputer
     cat_strategy = p.get("categorical_imputer", "most_frequent")
     if cat_strategy not in {"most_frequent", "constant"}:
         cat_strategy = "most_frequent"
-
     cat_imputer = SimpleImputer(strategy=cat_strategy)
 
     # One-hot encoder params
@@ -66,15 +89,9 @@ def preprocessor(
     handle_unknown = oh_cfg.get("handle_unknown", "ignore")
     min_frequency = oh_cfg.get("min_frequency", 50)
 
-    # Build sub-pipelines
-    num_pipe = Pipeline(
-        steps=[
-            ("imp", num_imputer),
-        ]
-    )
-
+    num_pipe = Pipeline([("imp", num_imputer)])
     cat_pipe = Pipeline(
-        steps=[
+        [
             ("imp", cat_imputer),
             ("oh", OneHotEncoder(handle_unknown=handle_unknown, min_frequency=min_frequency)),
         ]
@@ -86,13 +103,13 @@ def preprocessor(
             ("cat", cat_pipe, list(cat_cols)),
         ],
         remainder="drop",
-        sparse_threshold=0.3,  # let OHE keep sparse where helpful
+        sparse_threshold=0.3,  # allow sparse output for large OHEs
         n_jobs=None,
     )
 
 
 # --------------------------------------------------------------------------- #
-# Model registry
+# Model registry with auto device/model selection
 # --------------------------------------------------------------------------- #
 def make_model(
     kind: str,
@@ -100,42 +117,40 @@ def make_model(
     cfg: Optional[Mapping[str, Any]] = None,
 ) -> Pipeline:
     """
-    Create an sklearn Pipeline composed of:
-        preprocessor -> estimator
+    Create an sklearn Pipeline:  preprocessor -> estimator
 
     Supported `kind`:
-      - "ridge"
-      - "random_forest"
-      - "xgboost" (only if xgboost is installed)
-
-    Parameters
-    ----------
-    kind : str
-        Estimator kind.
-    pre : ColumnTransformer
-        Output of `preprocessor(...)`.
-    cfg : Mapping, optional
-        Full config dictionary; we read hyperparameters under `cfg["model"][<kind>]`.
-
-    Returns
-    -------
-    sklearn.pipeline.Pipeline
+      - "auto"          -> prefer XGBoost; GPU if available; else XGBoost CPU; else RandomForest
+      - "xgboost"       -> XGBRegressor (gpu_hist if available, else hist)
+      - "random_forest" -> RandomForestRegressor (CPU)
+      - "ridge"         -> Ridge (CPU)
     """
-    model_cfg = {}
+    model_cfg: dict[str, Any] = {}
     if isinstance(cfg, Mapping):
         model_section = cfg.get("model", {})
         if isinstance(model_section, Mapping):
+            # For explicit kinds we pull from that subsection; for "auto" we'll pick later
             model_cfg = model_section.get(kind, {}) or {}
 
-    kind = kind.lower().strip()
+    requested = kind.lower().strip()
 
-    if kind == "ridge":
-        # Ridge does not accept random_state; we pass only known params
+    # Resolve 'auto' to a concrete estimator
+    if requested == "auto":
+        xgb_enabled = True
+        if isinstance(cfg, Mapping):
+            xgb_enabled = (cfg.get("model", {}).get("xgboost", {}).get("enabled", True) is not False)
+        if _HAS_XGB and xgb_enabled:
+            requested = "xgboost"
+        else:
+            requested = "random_forest"
+
+    # --- Ridge ---
+    if requested == "ridge":
         params = _subset(model_cfg, {"alpha", "fit_intercept", "copy_X", "positive"})
         est = Ridge(**params)
 
-    elif kind == "random_forest":
-        # Pass through common RF params; sklearn ignores unknowns with TypeError, so subset to be safe
+    # --- Random Forest (CPU) ---
+    elif requested == "random_forest":
         allowed = {
             "n_estimators",
             "criterion",
@@ -158,13 +173,14 @@ def make_model(
         params = _subset(model_cfg, allowed)
         est = RandomForestRegressor(**params)
 
-    elif kind == "xgboost":
+    # --- XGBoost (GPU/CPU auto) ---
+    elif requested == "xgboost":
         if not _HAS_XGB:
             raise ImportError(
                 "Requested kind='xgboost' but xgboost is not installed. "
-                "Install it or choose a different model."
+                "Install it (e.g., `pip install xgboost`) or choose a different model."
             )
-        # Common, safe XGBRegressor params
+        # Allow config to provide defaults under model.xgboost
         allowed = {
             "n_estimators",
             "max_depth",
@@ -176,19 +192,60 @@ def make_model(
             "gamma",
             "min_child_weight",
             "tree_method",
+            "predictor",
             "n_jobs",
             "random_state",
         }
-        params = _subset(model_cfg, allowed)
-        # Keep objective consistent with log-price regression (squared error)
-        if "objective" not in params:
-            params["objective"] = "reg:squarederror"
+        xgb_cfg = {}
+        if isinstance(cfg, Mapping):
+            xgb_cfg = cfg.get("model", {}).get("xgboost", {}) or {}
+        params = _subset(xgb_cfg, allowed)
+
+        # Auto-choose backend
+        if _gpu_available():
+            params.setdefault("tree_method", "gpu_hist")
+            params.setdefault("predictor", "gpu_predictor")
+        else:
+            params.setdefault("tree_method", "hist")
+            # predictor: let xgboost decide (often 'auto' -> 'cpu_predictor')
+
+        params.setdefault("objective", "reg:squarederror")
         est = XGBRegressor(**params)
 
     else:
-        raise ValueError(f"Unknown model kind: {kind!r}. Choose 'ridge', 'random_forest', or 'xgboost'.")
+        raise ValueError(
+            f"Unknown model kind: {kind!r}. "
+            "Choose 'auto', 'xgboost', 'random_forest', or 'ridge'."
+        )
 
     return Pipeline([("pre", pre), ("mdl", est)])
+
+
+# --------------------------------------------------------------------------- #
+# Small utility to print the chosen backend in progress lines
+# --------------------------------------------------------------------------- #
+def describe_estimator(pipe: Pipeline) -> str:
+    """
+    Return a short description, e.g.:
+      - 'xgboost [gpu_hist]'
+      - 'xgboost [hist]'
+      - 'randomforestregressor'
+      - 'ridge'
+    """
+    try:
+        mdl = pipe.named_steps.get("mdl", None)
+        if mdl is None:
+            return "unknown"
+        name = mdl.__class__.__name__.lower()
+        if name == "xgbregressor":
+            # Try direct attr, then params
+            tm = getattr(mdl, "tree_method", None)
+            if not tm and hasattr(mdl, "get_xgb_params"):
+                tm = mdl.get_xgb_params().get("tree_method")
+            return f"xgboost [{tm}]" if tm else "xgboost"
+        return name
+    except Exception:
+        return "unknown"
 
 
 # --------------------------------------------------------------------------- #

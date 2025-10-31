@@ -154,3 +154,126 @@ def _get(cfg: Optional[Mapping[str, Any]], path: Iterable[str], default: Any = N
         return default if cur is None else cur
     except AttributeError:
         return default
+
+
+
+# ----------------------------- #
+# Phase-2: leakage-safe neighbors (train-only fit)
+# ----------------------------- #
+
+def add_zip_year_medians_train_only(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    target: str = "price",
+    group_keys: list[str] | tuple[str, ...] = ("zip_code", "year"),
+    out_name: str = "zip_year_price_median",
+    min_group_size: int = 50,
+    fill_strategy: str = "global_median",   # 'global_median' | 'zip_median'
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Fit group medians on TRAIN ONLY and attach leakage-safe features:
+
+    - TRAIN: previous-year median per zip (i.e., year-1). If unavailable, fallback.
+    - TEST: last-known training median for that (zip, year) ffilled over years. If unavailable, fallback.
+
+    Returns updated (train_df, test_df).
+    """
+    for col in ("zip_code", "year", target):
+        if col not in train_df.columns:
+            raise KeyError(f"'{col}' missing from train_df; cannot build {out_name}.")
+
+    # --- Compute global + per-zip fallbacks from TRAIN
+    global_median = float(train_df[target].median())
+    zip_median_map = train_df.groupby("zip_code")[target].median()
+
+    # --- Raw medians per (zip, year) with support for min_group_size
+    grp = train_df.groupby(list(group_keys))
+    counts = grp[target].size().rename("cnt")
+    med = grp[target].median().rename("med")
+    gy = pd.concat([med, counts], axis=1).reset_index()
+    gy = gy[gy["cnt"] >= int(min_group_size)]  # enforce support
+
+    # -------------------- TRAIN FEATURE (prev-year median) --------------------
+    gy_prev = gy.copy()
+    gy_prev["year"] = gy_prev["year"] + 1          # shift forward: median(Y-1) will map to rows at Y
+    gy_prev = gy_prev.rename(columns={"med": f"{out_name}_prev"})
+    # Merge into train on (zip, year)
+    train = train_df.merge(
+        gy_prev[["zip_code", "year", f"{out_name}_prev"]],
+        how="left",
+        on=["zip_code", "year"],
+    )
+
+    # Fallbacks for TRAIN
+    if fill_strategy == "zip_median":
+        train[f"{out_name}_prev"] = train[f"{out_name}_prev"].fillna(
+            train["zip_code"].map(zip_median_map)
+        )
+    else:
+        train[f"{out_name}_prev"] = train[f"{out_name}_prev"].fillna(global_median)
+
+    # -------------------- TEST FEATURE (ffilled training medians) --------------------
+    # Build a dense (zip, year) index covering training years we’ve seen
+    zy = gy[["zip_code", "year", "med"]].copy()
+    # For each zip, sort by year and forward-fill medians across years
+    zy = zy.sort_values(["zip_code", "year"])
+    zy["med_ffill"] = zy.groupby("zip_code")["med"].ffill()
+    zy_ffill = zy[["zip_code", "year", "med_ffill"]].rename(columns={"med_ffill": out_name})
+
+    # Map to TEST on exact (zip, year)
+    test = test_df.merge(zy_ffill, how="left", on=["zip_code", "year"])
+
+    # Fallbacks for TEST
+    if fill_strategy == "zip_median":
+        test[out_name] = test[out_name].fillna(test["zip_code"].map(zip_median_map))
+    else:
+        test[out_name] = test[out_name].fillna(global_median)
+
+    return train, test
+
+
+def maybe_add_neighbors_via_cfg(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    cfg: Optional[Mapping[str, Any]],
+    *,
+    target: str = "price",
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Read `features.leakage_safe_neighbors` from config and attach features if enabled.
+
+    Returns (train_df, test_df, added_feature_names)
+    """
+    added: list[str] = []
+    if cfg is None:
+        return train_df, test_df, added
+
+    block = _get(cfg, ("features", "leakage_safe_neighbors"), default=None)
+    if not block or not block.get("enabled", False):
+        return train_df, test_df, added
+
+    group_keys = block.get("group_keys", ["zip_code", "year"])
+    stats = block.get("stats", [{"kind": "median", "of": target, "name": "zip_year_price_median"}])
+    min_group_size = int(block.get("min_group_size", 50))
+    fill_strategy = str(block.get("fill_strategy", "global_median"))
+
+    for spec in stats:
+        if spec.get("kind") != "median":
+            raise NotImplementedError(f"Only 'median' supported in Phase-2. Got: {spec}")
+        of = spec.get("of", target)
+        name = spec.get("name", "zip_year_price_median")
+        train_df, test_df = add_zip_year_medians_train_only(
+            train_df,
+            test_df,
+            target=of,
+            group_keys=group_keys,
+            out_name=name,
+            min_group_size=min_group_size,
+            fill_strategy=fill_strategy,
+        )
+        added.append(name)
+        # For training rows we produced "<name>_prev"; include it as well
+        added.append(f"{name}_prev")
+
+    return train_df, test_df, added
