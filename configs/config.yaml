@@ -130,7 +130,7 @@ preprocess:
 # Model registry & params
 # ---------------------------- #
 model:
-  kind: random_forest             # ridge | random_forest | xgboost | lightgbm (if installed)
+  kind: auto             # ridge | random_forest | xgboost | lightgbm (if installed)
 
   ridge:
     alpha: 2.0

@@ -17,7 +17,7 @@ from . import io as io_mod
 from .split import temporal_split
 from .features import basic_time_feats, years_since_prev, apply_engineered, maybe_add_neighbors_via_cfg
 from .baselines import median_by_zip_year
-from .modeling import preprocessor, make_model
+from .modeling import preprocessor, make_model, describe_estimator
 
 try:
     from tqdm.auto import tqdm
@@ -172,7 +172,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     pre = preprocessor(num_cols, cat_cols, cfg=cfg)
     kind = cfg.get("model", {}).get("kind", "random_forest")
     pipe = make_model(kind, pre, cfg=cfg)
-    p.step(f"Model created: {kind}")
+    p.step(f"Model created: {describe_estimator(pipe)}")
 
     X_train = train_df[num_cols + cat_cols]
     X_test = test_df[num_cols + cat_cols]
