@@ -23,7 +23,7 @@ run:
 # Data loading & sanitation
 # ---------------------------- #
 data:
-  required_columns: ["price"]
+  required_columns: ["price", "sold_date"]
   parse_dates: ["sold_date", "prev_sold_date"]
   drop_inf: true
   drop_na_target: true
@@ -40,7 +40,16 @@ data:
       min: 0
       max_percentile: 99.9
 
-  export_schema_snapshot: true     # write schema snapshot to data/interim/schema.snapshot.json
+  # domain sanity rules: drop obviously nonsensical rows
+  sanity:
+    enabled: true
+    bed_col: bed
+    bath_col: bath
+    house_size_col: house_size
+    max_bath_to_bed_ratio: 5.0   # drop rows with bath > bed * 5
+    min_house_size: 100.0        # drop rows with house_size <= 100
+
+  export_schema_snapshot: true
 
 # ---------------------------- #
 # Target & transformation
@@ -106,9 +115,9 @@ features:
   # Outlier handling (simple winsorization for selected numeric columns)
   winsorize:
     enabled: true
-    columns: [house_size, acre_lot, bed, bath]
+    columns: [house_size, acre_lot]
     lower_pct: 0.0
-    upper_pct: 99.5
+    upper_pct: 99.0   # cap at 99th percentile
 
 # ---------------------------- #
 # Split protocol (Phase 6)

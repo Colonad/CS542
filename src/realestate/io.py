@@ -176,18 +176,48 @@ def load_data(
         df = df.dropna(subset=[target_col])
         _debug_count_delta("drop_na_target", before, df)
 
-    # --- Filters / winsorize
+    # --------------------------------------------------
+    # Filters / domain sanity / winsorization
+    # --------------------------------------------------
+
+    # 1) Per-column filters from config.data.filters
     if filters:
+        before = len(df)
         df = _apply_filters(df, filters)
+        _debug_count_delta("filters", before, df)
+
+    # 2) Domain sanity rules (cross-column, e.g. bath > bed*5, tiny house_size)
+    cfg_data = _get(cfg, "data", {}) if cfg is not None else {}
+    sanity_cfg = _get(cfg_data, "sanity", {})
+
+    if sanity_cfg.get("enabled", True):
+        df = _drop_nonsensical_rows(
+            df,
+            bed_col=sanity_cfg.get("bed_col", "bed"),
+            bath_col=sanity_cfg.get("bath_col", "bath"),
+            house_size_col=sanity_cfg.get("house_size_col", "house_size"),
+            max_bath_to_bed_ratio=float(sanity_cfg.get("max_bath_to_bed_ratio", 5.0)),
+            min_house_size=float(sanity_cfg.get("min_house_size", 100.0)),
+        )
+
+    # 3) Winsorize high-end numeric outliers (e.g. house_size / acre_lot)
     if winsorize_spec and winsorize_spec.get("enabled", False):
         cols = [c for c in winsorize_spec.get("columns", []) if c in df.columns]
         if cols:
             lower = float(winsorize_spec.get("lower_pct", 0.0))
-            upper = float(winsorize_spec.get("upper_pct", 99.5))
+            # default to 99.0 → "cap at 99th percentile"
+            upper = float(winsorize_spec.get("upper_pct", 99.0))
+            before = len(df)
             df = _winsorize(df, cols, lower, upper)
+            _debug_count_delta(
+                f"winsorize({','.join(cols)} p{lower}-{upper})",
+                before,
+                df,
+            )
 
     # --- ALWAYS dump schema snapshot
     interim_dir.mkdir(parents=True, exist_ok=True)
+
     snapshot_path = interim_dir / "schema.snapshot.json"
 
     # EARLY GUARD: if all rows were dropped by filters / missing target, fail with a clear message
@@ -501,6 +531,66 @@ def _winsorize(
         hi = np.nanpercentile(vals, upper_pct)
         out[col] = np.clip(vals, lo, hi)
     return out
+
+
+def _drop_nonsensical_rows(
+    df: pd.DataFrame,
+    *,
+    bed_col: str = "bed",
+    bath_col: str = "bath",
+    house_size_col: str = "house_size",
+    max_bath_to_bed_ratio: float = 5.0,
+    min_house_size: float = 100.0,
+) -> pd.DataFrame:
+    """
+    Drop rows with obviously nonsensical combinations, e.g.:
+
+      - bath > bed * max_bath_to_bed_ratio
+      - house_size <= min_house_size
+
+    Only applies these checks if the corresponding columns exist.
+    Rows with NaNs in these columns are *not* automatically dropped here
+    (they are handled elsewhere via general NA logic).
+    """
+    before = len(df)
+    if before == 0:
+        return df
+
+    mask = pd.Series(True, index=df.index)
+
+    # --- bath vs bed ---
+    if bed_col in df.columns and bath_col in df.columns:
+        bed = pd.to_numeric(df[bed_col], errors="coerce")
+        bath = pd.to_numeric(df[bath_col], errors="coerce")
+
+        # If both bed and bath are present, mark rows where bath is "too large"
+        too_many_baths = bath > (bed * max_bath_to_bed_ratio)
+
+        # Treat bed == 0 with bath > 0 as nonsensical as well
+        bed_zero_and_bath_positive = (bed == 0) & (bath > 0)
+
+        bad_bath_rows = (too_many_baths | bed_zero_and_bath_positive).fillna(False)
+        mask &= ~bad_bath_rows
+
+    # --- tiny / nonsensical house sizes ---
+    if house_size_col in df.columns:
+        hs = pd.to_numeric(df[house_size_col], errors="coerce")
+        tiny_or_nonpositive = hs <= min_house_size
+        bad_size_rows = tiny_or_nonpositive.fillna(False)
+        mask &= ~bad_size_rows
+
+    if mask.all():
+        # Nothing dropped
+        return df
+
+    cleaned = df.loc[mask].copy()
+    _debug_count_delta(
+        f"nonsensical_rows(bath>{max_bath_to_bed_ratio}*bed or {house_size_col}<={min_house_size})",
+        before,
+        cleaned,
+    )
+    return cleaned
+
 
 
 def _write_schema_snapshot(
