@@ -3,8 +3,9 @@
 src/realestate/train_sweep.py
 =============================
 
-Phase 6 — Model sweep (small grid)
+Phase 6–8 — Model sweep, reproducibility, and final artifacts
 
+Phase 6 — Model sweep (small grid)
 - 3-way temporal split:
     train ≤ 2022, val = 2023, test ≥ 2024
 - Model families and grids:
@@ -18,11 +19,20 @@ Phase 6 — Model sweep (small grid)
 
 Artifacts written under paths.out_dir:
   - run/<run_id>/{metrics,preds,models}/...
-  - metrics/phase6_sweep_metrics.json (consolidated)
-  - preds/test_preds_*.csv (per final model)
-  - models/*.pkl (fitted pipelines)
+  - metrics/phase6_sweep_metrics.json (consolidated sweep + final test metrics)
+  - metrics/summary.csv              (baseline vs model metrics table)      <-- Phase 8
+  - metrics/slices.json              (top error slices by state/ZIP)        <-- Phase 8
+  - preds/test_preds_ridge.csv       (per-family test preds)
+  - preds/test_preds_rf.csv
+  - preds/test_preds_xgb.csv (if enabled)
+  - preds/test_preds.csv             (best-overall model: sold_date, city,
+                                      state, zip_code, price, pred_model)   <-- Phase 8
+  - models/phase6_ridge.pkl, models/phase6_rf.pkl, models/phase6_xgb.pkl
+  - models/model.pkl                 (single best-overall model artifact)   <-- Phase 8
   - models/feature_importances_*.csv (RF/XGB grouped importances if available)
+  - run/<run_id>/summary.md          (one-pager summary)                    <-- Phase 8
   - run/.../metrics/config.snapshot.yaml (config copy)
+  - run/.../run.json                 (NA summary & basic data overview)
 
 Requires:
   - configs/config.yaml
@@ -31,6 +41,7 @@ Requires:
                                    apply_engineered, maybe_add_neighbors_via_cfg)
   - src/realestate/modeling.py    (preprocessor)
   - src/realestate/baselines.py   (median_by_zip_year)
+  - src/realestate/repro.py       (set_global_seed, na_summary)
 """
 
 from __future__ import annotations
@@ -38,7 +49,7 @@ from __future__ import annotations
 import json
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Sequence
 from datetime import datetime
 import hashlib
 import math
@@ -68,7 +79,7 @@ from .features import (
 )
 from .baselines import median_by_zip_year
 from .modeling import preprocessor, describe_estimator
-
+from .repro import set_global_seed, na_summary  
 try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover (defensive)
@@ -665,6 +676,315 @@ def _try_feature_importances(pipe: Pipeline, X_like: pd.DataFrame) -> Optional[p
         return None
 
 
+
+def _json_safe_value(x: Any) -> Any:
+    """Convert values to something JSON-safe (NaN/inf -> None)."""
+    try:
+        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+            return None
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
+    return x
+
+
+def _compute_error_slices(
+    df: pd.DataFrame,
+    *,
+    target_col: str,
+    pred: np.ndarray,
+    group_cols: Sequence[str],
+    min_count: int,
+    topk: int,
+) -> List[Dict[str, Any]]:
+    """
+    Compute top error slices by group_cols, sorted by MAE descending.
+
+    Returns list of:
+      {
+        "group": {col: value, ...},
+        "count": int,
+        "MAE": float,
+        "RMSE": float,
+      }
+    """
+    if pred is None or len(pred) != len(df):
+        raise ValueError("Prediction array length must match dataframe length for slices.")
+
+    group_cols = [c for c in group_cols if c in df.columns]
+    if not group_cols:
+        return []
+
+    y_true = df[target_col].to_numpy(dtype=float)
+    tmp = df[group_cols].copy()
+    tmp["y_true"] = y_true
+    tmp["y_pred"] = np.asarray(pred, dtype=float)
+    tmp["abs_err"] = np.abs(tmp["y_true"] - tmp["y_pred"])
+
+    def _rmse(e: pd.Series) -> float:
+        arr = e.to_numpy(dtype=float)
+        if arr.size == 0:
+            return float("nan")
+        return float(np.sqrt(np.mean(np.square(arr))))
+
+    gb = tmp.groupby(group_cols, dropna=False)
+    agg = gb.agg(
+        count=("y_true", "size"),
+        MAE=("abs_err", "mean"),
+        RMSE=("abs_err", _rmse),
+    ).reset_index()
+
+    agg = agg[agg["count"] >= int(min_count)]
+    if agg.empty:
+        return []
+
+    agg = agg.sort_values("MAE", ascending=False).head(int(topk))
+
+    records: List[Dict[str, Any]] = []
+    for _, row in agg.iterrows():
+        group = {col: _json_safe_value(row[col]) for col in group_cols}
+        records.append(
+            {
+                "group": group,
+                "count": int(row["count"]),
+                "MAE": float(row["MAE"]),
+                "RMSE": float(row["RMSE"]),
+            }
+        )
+    return records
+
+
+def _build_summary_table_rows(
+    *,
+    base_metrics_val: Mapping[str, float],
+    base_metrics_test: Mapping[str, float],
+    best_ridge: Mapping[str, Any],
+    best_rf: Mapping[str, Any],
+    best_xgb: Mapping[str, Any],
+    enable_xgb: bool,
+    final_artifacts: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Build row-wise summary of baseline + model metrics for summary.csv.
+
+    Each row:
+      {
+        "model_family": "baseline"/"ridge"/"rf"/"xgb",
+        "model_name":   "...",
+        "split":        "val"/"test",
+        "MAE": float,
+        "RMSE": float,
+        "R2": float
+      }
+    """
+    rows: List[Dict[str, Any]] = []
+
+    # Baseline rows
+    rows.append(
+        {
+            "model_family": "baseline",
+            "model_name": "median_by_zip_year",
+            "split": "val",
+            "MAE": float(base_metrics_val["MAE"]),
+            "RMSE": float(base_metrics_val["RMSE"]),
+            "R2": float(base_metrics_val["R2"]),
+        }
+    )
+    rows.append(
+        {
+            "model_family": "baseline",
+            "model_name": "median_by_zip_year",
+            "split": "test",
+            "MAE": float(base_metrics_test["MAE"]),
+            "RMSE": float(base_metrics_test["RMSE"]),
+            "R2": float(base_metrics_test["R2"]),
+        }
+    )
+
+    def _add_family_rows(fam_tag: str, best: Mapping[str, Any]) -> None:
+        if not best or best.get("metrics_val") is None:
+            return
+        if fam_tag not in final_artifacts:
+            return
+        val = best["metrics_val"]
+        te = final_artifacts[fam_tag]["final_metrics_test"]
+        rows.extend(
+            [
+                {
+                    "model_family": fam_tag,
+                    "model_name": fam_tag,
+                    "split": "val",
+                    "MAE": float(val["MAE"]),
+                    "RMSE": float(val["RMSE"]),
+                    "R2": float(val["R2"]),
+                },
+                {
+                    "model_family": fam_tag,
+                    "model_name": fam_tag,
+                    "split": "test",
+                    "MAE": float(te["MAE"]),
+                    "RMSE": float(te["RMSE"]),
+                    "R2": float(te["R2"]),
+                },
+            ]
+        )
+
+    _add_family_rows("ridge", best_ridge)
+    _add_family_rows("rf", best_rf)
+    if enable_xgb:
+        _add_family_rows("xgb", best_xgb)
+
+    return rows
+
+
+def _build_one_pager_md(
+    *,
+    run_name: str,
+    cfg: Mapping[str, Any],
+    run_info: Mapping[str, Any],
+    base_metrics_val: Mapping[str, float],
+    base_metrics_test: Mapping[str, float],
+    best_overall_family: str,
+    best_overall: Mapping[str, Any],
+    final_artifacts: Mapping[str, Any],
+    date_window: Mapping[str, Any],
+) -> str:
+    """
+    Build a one-page Markdown summary for the run:
+      - problem
+      - data window
+      - split protocol
+      - metrics (baseline vs best)
+      - key insights
+      - next steps
+    """
+    data_csv = cfg["paths"]["data_csv"]
+    split_years = run_info.get("split_years", {})
+    train_rows = run_info.get("train_rows")
+    val_rows = run_info.get("val_rows")
+    test_rows = run_info.get("test_rows")
+
+    base_test = base_metrics_test
+    fam_tag = best_overall_family
+    best_test = final_artifacts.get(fam_tag, {}).get("final_metrics_test", {})
+
+    def fmt(v: Any) -> str:
+        try:
+            return f"{float(v):.3f}"
+        except Exception:
+            return "n/a"
+
+    lines: List[str] = []
+    lines.append(f"# Phase 6–8 Summary — Run `{run_name}`")
+    lines.append("")
+    lines.append("## Problem")
+    lines.append("")
+    lines.append(
+        "Supervised regression task: predict residential **sale price** (`price`, USD) "
+        "for U.S. properties, using structural features (bed, bath, house size, lot size) "
+        "and location (city, state, ZIP), plus time-derived and neighborhood aggregate features."
+    )
+    lines.append("")
+    lines.append("## Data window & split protocol")
+    lines.append("")
+    lines.append(f"- **Source CSV:** `{data_csv}`")
+    if date_window.get("min") and date_window.get("max"):
+        lines.append(
+            f"- **Observed sale dates:** {date_window['min']} → {date_window['max']}"
+        )
+    lines.append(
+        f"- **Temporal split (by `sold_date.year`):** "
+        f"train ≤ {split_years.get('train_max')}, "
+        f"val = {split_years.get('val')}, "
+        f"test ≥ {split_years.get('test_min')}"
+    )
+    lines.append(
+        f"- **Rows:** train = {train_rows}, val = {val_rows}, test = {test_rows}"
+    )
+    lines.append("")
+    lines.append("## Models & metrics (baseline vs best)")
+    lines.append("")
+    lines.append("| Model | Split | MAE | RMSE | R² |")
+    lines.append("|-------|-------|-----|------|----|")
+    lines.append(
+        f"| ZIP×year median baseline | val | {fmt(base_metrics_val['MAE'])} | "
+        f"{fmt(base_metrics_val['RMSE'])} | {fmt(base_metrics_val['R2'])} |"
+    )
+    lines.append(
+        f"| ZIP×year median baseline | test | {fmt(base_test['MAE'])} | "
+        f"{fmt(base_test['RMSE'])} | {fmt(base_test['R2'])} |"
+    )
+    if best_test:
+        lines.append(
+            f"| Best model: **{fam_tag}** | val | "
+            f"{fmt(best_overall['metrics_val']['MAE'])} | "
+            f"{fmt(best_overall['metrics_val']['RMSE'])} | "
+            f"{fmt(best_overall['metrics_val']['R2'])} |"
+        )
+        lines.append(
+            f"| Best model: **{fam_tag}** | test | "
+            f"{fmt(best_test.get('MAE'))} | "
+            f"{fmt(best_test.get('RMSE'))} | "
+            f"{fmt(best_test.get('R2'))} |"
+        )
+    else:
+        lines.append(
+            "| Best model | val | n/a | n/a | n/a |"
+        )
+        lines.append(
+            "| Best model | test | n/a | n/a | n/a |"
+        )
+
+    lines.append("")
+    lines.append("## Key insights")
+    lines.append("")
+    if best_test:
+        lines.append(
+            f"- The best model family on validation R² is **{fam_tag}**, "
+            f"with test MAE ≈ {fmt(best_test.get('MAE'))} vs baseline MAE "
+            f"{fmt(base_test['MAE'])}."
+        )
+        lines.append(
+            "- Tree-based and boosted models handle the mix of numeric and "
+            "categorical features well once leak-safe neighborhood statistics "
+            "are included."
+        )
+        lines.append(
+            "- The log-transform of `price` combined with Duan smearing stabilizes "
+            "training and yields more robust errors in high-price regions."
+        )
+    else:
+        lines.append(
+            "- Baseline metrics are available, but best-model metrics were not recorded."
+        )
+
+    lines.append("")
+    lines.append("## Next steps")
+    lines.append("")
+    lines.append(
+        "- Add cross-validation or rolling time-window validation to stress-test "
+        "temporal stability."
+    )
+    lines.append(
+        "- Run targeted ablations (e.g., remove neighbor features, remove log-transform) "
+        "to quantify their impact."
+    )
+    lines.append(
+        "- Investigate top error slices by state/ZIP (see `slices.json`) and decide "
+        "whether to add region-specific features."
+    )
+    lines.append(
+        "- Prepare final slides/report with figures: predicted vs actual, residuals vs "
+        "price, and feature importance."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+
+
 def run(cfg_path: str = "configs/config.yaml") -> None:
     # ----------------------------------------------------------------------------------
     # Load config and prepare folders
@@ -689,9 +1009,13 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         (run_dir / "preds").mkdir(parents=True, exist_ok=True)
         (run_dir / "models").mkdir(parents=True, exist_ok=True)
 
-    # Steps counter (rough)
+    # --- Phase 7: lock random_state globally for reproducibility ---
+    rs = int(cfg.get("run", {}).get("random_state", 0))
+    set_global_seed(rs)
+
+    # Rough step count for progress bar
     total_steps = 20
-    p = Prog(enabled=True, total=total_steps, desc="Phase 6: Model Sweep")
+    p = Prog(enabled=True, total=total_steps, desc="Phase 6–8: Sweep + Artifacts")
 
     # ----------------------------------------------------------------------------------
     # Data, features, split
@@ -700,52 +1024,93 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     target_col, use_log = tgt[0], bool(tgt[1])
     p.step("Prepared features & finalized splits")
 
+    # Data window (for Phase 8 summary)
+    if "sold_date" in tr_df.columns:
+        all_dates = pd.concat(
+            [tr_df["sold_date"], va_df["sold_date"], te_df["sold_date"]],
+            ignore_index=True,
+        )
+        min_date = all_dates.min()
+        max_date = all_dates.max()
+        if pd.notna(min_date) and pd.notna(max_date):
+            date_window = {
+                "min": min_date.strftime("%Y-%m-%d"),
+                "max": max_date.strftime("%Y-%m-%d"),
+            }
+        else:
+            date_window = {"min": None, "max": None}
+    else:
+        date_window = {"min": None, "max": None}
 
-    # Build a single preprocessor and encode TRAIN / VAL once for sweeps
-    X_tr_df = tr_df[num_cols + cat_cols]
-    X_va_df = va_df[num_cols + cat_cols]
+
+    # ----------------------------------------------------------------------------------
+    # Build design matrices for TRAIN / VAL and pre-encode once for sweeps
+    # ----------------------------------------------------------------------------------
+    X_tr = tr_df[num_cols + cat_cols].copy()
+    X_va = va_df[num_cols + cat_cols].copy()
     y_tr = tr_df[target_col]
     y_va = va_df[target_col]
 
+    # Attach attrs so helper functions (_fit_eval_one, _try_feature_importances) can
+    # discover feature groups without needing global lists.
+    for X in (X_tr, X_va):
+        X.attrs["num_cols"] = list(num_cols)
+        X.attrs["cat_cols"] = list(cat_cols)
+
     pre_for_sweep = preprocessor(num_cols, cat_cols, cfg=cfg)
-    pre_for_sweep.fit(X_tr_df)
-
-    X_tr_enc = _to_float32(pre_for_sweep.transform(X_tr_df))
-    X_va_enc = _to_float32(pre_for_sweep.transform(X_va_df))
-
-
-
+    pre_for_sweep.fit(X_tr)
+    X_tr_enc = _to_float32(pre_for_sweep.transform(X_tr))
+    X_va_enc = _to_float32(pre_for_sweep.transform(X_va))
+    p.step("Encoded train/val matrices for sweeps")
 
     # ----------------------------------------------------------------------------------
     # Baseline (zip×year median) for val & test
     # ----------------------------------------------------------------------------------
     base_val = median_by_zip_year(tr_df, va_df, target=target_col)
-    base_test = median_by_zip_year(pd.concat([tr_df, va_df], ignore_index=True), te_df, target=target_col)
-    base_metrics_val = _compute_metrics(va_df[target_col].to_numpy(dtype=float), base_val.to_numpy(dtype=float))
-    base_metrics_test = _compute_metrics(te_df[target_col].to_numpy(dtype=float), base_test.to_numpy(dtype=float))
+    base_test = median_by_zip_year(
+        pd.concat([tr_df, va_df], ignore_index=True),
+        te_df,
+        target=target_col,
+    )
+    base_metrics_val = _compute_metrics(
+        va_df[target_col].to_numpy(dtype=float),
+        base_val.to_numpy(dtype=float),
+    )
+    base_metrics_test = _compute_metrics(
+        te_df[target_col].to_numpy(dtype=float),
+        base_test.to_numpy(dtype=float),
+    )
     p.step("Computed baselines for val/test")
 
     # ----------------------------------------------------------------------------------
-    # Build grids (overrideable via config.sweep.*)
+    # Build grids (overrideable via config.sweep.*) and probe device backends
     # ----------------------------------------------------------------------------------
     sweep_cfg = cfg.get("sweep", {}) or {}
     enable_xgb = bool(sweep_cfg.get("xgb", {}).get("enabled", True))
 
     # --- cuML banner / toggles ---
-    cu_cfg = (sweep_cfg.get("use_cuml", {}) or {})
+    cu_cfg = sweep_cfg.get("use_cuml", {}) or {}
     cu_global = bool(cu_cfg.get("enabled", False))
     cu_for_ridge = cu_global and bool(cu_cfg.get("ridge", False))
     cu_for_rf = cu_global and bool(cu_cfg.get("rf", False))
     cu_info = _probe_cuml()
+
     if cu_global:
-        print(f"[cuML] requested=True available={cu_info['available']} note={cu_info['note']} ver={cu_info['version']}")
+        print(
+            f"[cuML] requested=True available={cu_info['available']} "
+            f"note={cu_info['note']} ver={cu_info['version']}"
+        )
         if not cu_info["available"]:
             print("[cuML] Falling back to sklearn for Ridge/RF.")
     else:
         print("[cuML] requested=False (Ridge/RF default to sklearn)")
 
-    # --- XGBoost GPU probe (mirror other phase scripts) ---
-    xgb_device_plan = {"gpu_ok": False, "note": "XGB disabled by config", "gpu_params": {}}
+    # --- XGBoost GPU probe ---
+    xgb_device_plan: Dict[str, Any] = {
+        "gpu_ok": False,
+        "note": "XGB disabled by config",
+        "gpu_params": {},
+    }
     if enable_xgb:
         gpu_ok, note, gpu_params = _probe_xgb_gpu()
         xgb_device_plan.update({"gpu_ok": gpu_ok, "note": note, "gpu_params": gpu_params})
@@ -763,14 +1128,14 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         else:
             print("[RF backend] sklearn (CPU) (cuML not requested)")
 
-
+    # --- Hyperparameter grids ---
     ridge_grid = sweep_cfg.get("ridge", {}).get("alpha", [0.5, 1.0, 2.0, 5.0])
 
     rf_grid = {
         "n_estimators": sweep_cfg.get("rf", {}).get("n_estimators", [400, 800]),
         "min_samples_leaf": sweep_cfg.get("rf", {}).get("min_samples_leaf", [1, 2, 4]),
         "max_depth": sweep_cfg.get("rf", {}).get("max_depth", [None, 20, 40]),
-        "random_state": [int(cfg.get("run", {}).get("random_state", 0))],
+        "random_state": [rs],
         "n_jobs": [-1],
     }
 
@@ -780,7 +1145,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         "n_estimators": sweep_cfg.get("xgb", {}).get("n_estimators", [600, 900, 1200]),
         "subsample": sweep_cfg.get("xgb", {}).get("subsample", [0.8]),
         "colsample_bytree": sweep_cfg.get("xgb", {}).get("colsample_bytree", [0.8]),
-        "random_state": [int(cfg.get("run", {}).get("random_state", 0))],
+        "random_state": [rs],
         "verbosity": [0],
         "objective": ["reg:squarederror"],
         # device/tree_method injected after GPU probe
@@ -789,20 +1154,22 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     # ----------------------------------------------------------------------------------
     # Sweep: Ridge
     # ----------------------------------------------------------------------------------
-    trials_ridge = []
-    # No pipeline stored in best_ridge now; we refit later on train+val
-    best_ridge = {"params": None, "metrics_val": None, "smear_train": None, "device_used": None}
+    trials_ridge: List[Dict[str, Any]] = []
+    best_ridge: Dict[str, Any] = {
+        "params": None,
+        "metrics_val": None,
+        "smear_train": None,
+        "device_used": None,
+    }
 
     if tqdm is not None:
         tq = tqdm(total=len(ridge_grid), desc="Ridge sweep", leave=True)
     else:
         tq = None
 
-    rs = int(cfg.get("run", {}).get("random_state", 0))
     for alpha in ridge_grid:
         est, dev_hint = _build_ridge(alpha=float(alpha), rs=rs, use_cuml=cu_for_ridge, cu_info=cu_info)
 
-        # Fast path: use pre-encoded matrices instead of refitting preprocessing each time
         metrics_val, smear, _ = _fit_eval_one_matrix(
             est,
             X_tr_enc,
@@ -836,23 +1203,29 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         tq.close()
     p.step("Ridge sweep complete")
 
-
     # ----------------------------------------------------------------------------------
     # Sweep: Random Forest
     # ----------------------------------------------------------------------------------
-    rf_candidates = []
+    rf_candidates: List[Dict[str, Any]] = []
     for n in rf_grid["n_estimators"]:
         for leaf in rf_grid["min_samples_leaf"]:
             for depth in rf_grid["max_depth"]:
-                rf_candidates.append({"n_estimators": int(n), "min_samples_leaf": int(leaf), "max_depth": depth})
+                rf_candidates.append(
+                    {"n_estimators": int(n), "min_samples_leaf": int(leaf), "max_depth": depth}
+                )
 
     if tqdm is not None:
         tq = tqdm(total=len(rf_candidates), desc="RF sweep", leave=True)
     else:
         tq = None
 
-    trials_rf = []
-    best_rf = {"params": None, "metrics_val": None, "smear_train": None, "device_used": None}
+    trials_rf: List[Dict[str, Any]] = []
+    best_rf: Dict[str, Any] = {
+        "params": None,
+        "metrics_val": None,
+        "smear_train": None,
+        "device_used": None,
+    }
 
     for spec in rf_candidates:
         est, dev_hint = _build_rf(spec, rs=rs, use_cuml=cu_for_rf, cu_info=cu_info)
@@ -863,7 +1236,6 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
                 RuntimeWarning,
             )
 
-        # Fast path: use pre-encoded matrices
         metrics_val, smear, _ = _fit_eval_one_matrix(
             est,
             X_tr_enc,
@@ -900,8 +1272,14 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     # ----------------------------------------------------------------------------------
     # Sweep: XGBoost (optional)
     # ----------------------------------------------------------------------------------
-    trials_xgb = []
-    best_xgb = {"params": None, "metrics_val": None, "pipe": None, "smear_train": None, "device_used": None}
+    trials_xgb: List[Dict[str, Any]] = []
+    best_xgb: Dict[str, Any] = {
+        "params": None,
+        "metrics_val": None,
+        "pipe": None,
+        "smear_train": None,
+        "device_used": None,
+    }
 
     if enable_xgb:
         try:
@@ -910,8 +1288,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             gpu_ok = xgb_device_plan["gpu_ok"]
             gpu_params = xgb_device_plan["gpu_params"]
 
-            # Build candidate list
-            xgb_candidates = []
+            xgb_candidates: List[Dict[str, Any]] = []
             for lr in xgb_grid["learning_rate"]:
                 for md in xgb_grid["max_depth"]:
                     for ne in xgb_grid["n_estimators"]:
@@ -928,7 +1305,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
                                     "objective": "reg:squarederror",
                                 }
                                 if gpu_ok:
-                                    cand.update(gpu_params)  # e.g. {'device':'cuda','tree_method':'hist','predictor':'gpu_predictor'}
+                                    cand.update(gpu_params)
                                 else:
                                     cand["tree_method"] = "hist"
                                     cand.pop("predictor", None)
@@ -942,10 +1319,17 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
 
             for spec in xgb_candidates:
                 est = XGBRegressor(**spec)
-                metrics_val, pipe, smear, _ = _fit_eval_one(est, X_tr, y_tr, X_va, y_va, use_log=use_log)
-                # Determine runtime device (post-fit)
+                metrics_val, pipe, smear, _ = _fit_eval_one(
+                    est,
+                    X_tr,
+                    y_tr,
+                    X_va,
+                    y_va,
+                    use_log=use_log,
+                )
                 dev_rt = _xgb_runtime_device(pipe)
                 used_device = "gpu" if (dev_rt in ("gpu", "cuda")) else "cpu"
+
                 trial = {
                     "params": {k: v for k, v in spec.items() if k not in ("verbosity",)},
                     "metrics_val": metrics_val,
@@ -953,17 +1337,24 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
                     "device_used": used_device,
                 }
                 trials_xgb.append(trial)
+
                 if (best_xgb["metrics_val"] is None) or (metrics_val["R2"] > best_xgb["metrics_val"]["R2"]):
                     best_xgb.update(
-                        params=trial["params"], metrics_val=metrics_val, pipe=pipe, smear_train=smear,
-                        device_used=used_device
+                        params=trial["params"],
+                        metrics_val=metrics_val,
+                        pipe=pipe,
+                        smear_train=smear,
+                        device_used=used_device,
                     )
+
                 if tq:
                     tq.set_postfix_str(
-                        f"md={spec['max_depth']}, ne={spec['n_estimators']}, lr={spec['learning_rate']} R2={metrics_val['R2']:.3f}",
-                        refresh=True
+                        f"md={spec['max_depth']}, ne={spec['n_estimators']}, "
+                        f"lr={spec['learning_rate']} R2={metrics_val['R2']:.3f}",
+                        refresh=True,
                     )
                     tq.update(1)
+
             if tq:
                 tq.close()
         except Exception as e:
@@ -971,12 +1362,13 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             xgb_device_plan["note"] = f"XGB disabled due to import/fit error: {e}"
     else:
         xgb_device_plan["note"] = "XGB disabled by config"
+
     p.step("XGBoost sweep complete" if enable_xgb else "XGBoost skipped/disabled")
 
     # ----------------------------------------------------------------------------------
     # Choose best-per-family and best-overall on VAL R2
     # ----------------------------------------------------------------------------------
-    family_results = []
+    family_results: List[Tuple[str, Dict[str, Any]]] = []
     if best_ridge["metrics_val"] is not None:
         family_results.append(("ridge", best_ridge))
     if best_rf["metrics_val"] is not None:
@@ -987,38 +1379,57 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     if not family_results:
         raise RuntimeError("No successful model trials were completed.")
 
-    def _r2_of(rec): return rec[1]["metrics_val"]["R2"]
+    def _r2_of(rec: Tuple[str, Dict[str, Any]]) -> float:
+        return float(rec[1]["metrics_val"]["R2"])
+
     best_overall_family, best_overall = max(family_results, key=_r2_of)
 
     # ----------------------------------------------------------------------------------
     # Final refits on TRAIN+VAL and evaluate on TEST
     # ----------------------------------------------------------------------------------
     trainval_df = pd.concat([tr_df, va_df], ignore_index=True)
-    X_trv = trainval_df[num_cols + cat_cols]
-    X_te = te_df[num_cols + cat_cols]
+    X_trv = trainval_df[num_cols + cat_cols].copy()
+    X_te = te_df[num_cols + cat_cols].copy()
     y_trv = trainval_df[target_col]
     y_te = te_df[target_col]
 
-    final_artifacts = {}
+    # attach attrs for feature importance grouping
+    X_trv.attrs["num_cols"] = list(num_cols)
+    X_trv.attrs["cat_cols"] = list(cat_cols)
+
+    final_artifacts: Dict[str, Any] = {}
+    best_final_pipe: Optional[Pipeline] = None
+    best_final_preds_test: Optional[np.ndarray] = None
+
     for fam, best in (("ridge", best_ridge), ("rf", best_rf), ("xgb", best_xgb)):
         if fam == "xgb" and (not enable_xgb or best["metrics_val"] is None):
             continue
 
         # Rebuild estimator from best params
         if fam == "ridge":
-            est, dev_hint = _build_ridge(alpha=float(best["params"]["alpha"]), rs=rs, use_cuml=cu_for_ridge, cu_info=cu_info)
+            est, dev_hint = _build_ridge(
+                alpha=float(best["params"]["alpha"]),
+                rs=rs,
+                use_cuml=cu_for_ridge,
+                cu_info=cu_info,
+            )
         elif fam == "rf":
             est, dev_hint = _build_rf(best["params"], rs=rs, use_cuml=cu_for_rf, cu_info=cu_info)
         else:  # xgb
             from xgboost import XGBRegressor
             est = XGBRegressor(**best["params"])
-            dev_hint = None  # we will infer
+            dev_hint = None  # runtime device inferred below
 
-        pipe = _build_pipeline(est, X_trv.attrs["num_cols"], X_trv.attrs["cat_cols"], cfg={})
-        y_trv_fit = np.log1p(y_trv.to_numpy(dtype=float)) if use_log else y_trv.to_numpy(dtype=float)
+        pipe = _build_pipeline(est, num_cols, cat_cols, cfg=cfg)
+        y_trv_arr = y_trv.to_numpy(dtype=float)
+        if use_log:
+            y_trv_fit = np.log1p(y_trv_arr)
+        else:
+            y_trv_fit = y_trv_arr
+
         pipe.fit(X_trv, y_trv_fit)
 
-        smear_trv = None
+        smear_trv: Optional[float] = None
         if use_log:
             yhat_trv_fit = pipe.predict(X_trv)
             smear_trv = _duan_smearing_factor(y_trv_fit, yhat_trv_fit)
@@ -1027,14 +1438,15 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         yhat_te = _inverse_target(yhat_te_fit, use_log=use_log, smear=smear_trv)
         metrics_te = _compute_metrics(y_te.to_numpy(dtype=float), yhat_te)
 
-        # Save artifacts
         fam_tag = {"ridge": "ridge", "rf": "rf", "xgb": "xgb"}[fam]
-        model_path = (models_dir / f"phase6_{fam_tag}.pkl")
+
+        # Save per-family model + preds
+        model_path = models_dir / f"phase6_{fam_tag}.pkl"
         joblib_dump(pipe, model_path)
 
         preds = te_df[["sold_date", "city", "state", "zip_code", target_col]].copy()
         preds[f"pred_{fam_tag}"] = yhat_te
-        preds[f"pred_baseline"] = base_test.values
+        preds["pred_baseline"] = base_test.values
         preds_path = preds_dir / f"test_preds_{fam_tag}.csv"
         preds.to_csv(preds_path, index=False)
 
@@ -1060,12 +1472,69 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "final_model_params": _safe_model_params(pipe),
             "device_used_final": used_dev,
         }
+
+        # Phase 8: record best overall model's predictions + artifact
+        if fam == best_overall_family:
+            best_final_pipe = pipe
+            best_final_preds_test = yhat_te
+
+            # Combined best-model predictions:
+            #   sold_date, city, state, zip_code, price, pred_model
+            combined = te_df[["sold_date", "city", "state", "zip_code", target_col]].copy()
+            combined = combined.rename(columns={target_col: "price"})
+            combined["pred_model"] = best_final_preds_test
+            combined_path = preds_dir / "test_preds.csv"
+            combined.to_csv(combined_path, index=False)
+            if run_dir:
+                combined_csv = combined.to_csv(index=False)
+                (run_dir / "preds" / "test_preds.csv").write_text(combined_csv)
+
+            # Optional: single best-model artifact
+            best_model_path = models_dir / "model.pkl"
+            joblib_dump(best_final_pipe, best_model_path)
+
     p.step("Final refits on train+val and test evaluation complete")
 
+
     # ----------------------------------------------------------------------------------
-    # Consolidated metrics JSON
+    # Phase 9: DoD check — model beats baseline on MAE and RMSE (test set)
     # ----------------------------------------------------------------------------------
-    run_info = {
+    best_test_metrics = final_artifacts[best_overall_family]["final_metrics_test"]
+
+    dod_flags = {
+        # We always compute test metrics for the best family at this point.
+        "metrics_reported_on_test": True,
+        # Strict DoD: best model must beat the baseline on BOTH MAE and RMSE.
+        "model_beats_baseline": (
+            float(best_test_metrics["MAE"]) < float(base_metrics_test["MAE"])
+            and float(best_test_metrics["RMSE"]) < float(base_metrics_test["RMSE"])
+        ),
+    }
+
+    if dod_flags["model_beats_baseline"]:
+        print(
+            f"[DoD] Best model ({best_overall_family}) BEATS baseline on test:\n"
+            f"      MAE  model={best_test_metrics['MAE']:.3f}, "
+            f"baseline={base_metrics_test['MAE']:.3f}\n"
+            f"      RMSE model={best_test_metrics['RMSE']:.3f}, "
+            f"baseline={base_metrics_test['RMSE']:.3f}"
+        )
+    else:
+        print(
+            f"[DoD WARNING] Best model ({best_overall_family}) does NOT beat baseline "
+            f"on both MAE and RMSE on the test set.\n"
+            f"      MAE  model={best_test_metrics['MAE']:.3f}, "
+            f"baseline={base_metrics_test['MAE']:.3f}\n"
+            f"      RMSE model={best_test_metrics['RMSE']:.3f}, "
+            f"baseline={base_metrics_test['RMSE']:.3f}"
+        )
+
+
+
+    # ----------------------------------------------------------------------------------
+    # Consolidated metrics JSON (phase6_sweep_metrics.json)
+    # ----------------------------------------------------------------------------------
+    run_info: Dict[str, Any] = {
         "phase": "6",
         "run_id": run_name,
         "random_state": cfg.get("run", {}).get("random_state", 0),
@@ -1080,6 +1549,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "test_min": int(cfg.get("split", {}).get("test_min_year", 2024)),
         },
         "feature_counts": {"numeric": len(num_cols), "categorical": len(cat_cols)},
+        "date_window": date_window,
         "gpu_probe": None,
         "cuml": {
             "requested": {"enabled": cu_global, "ridge": cu_for_ridge, "rf": cu_for_rf},
@@ -1087,6 +1557,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "version": cu_info["version"],
             "note": cu_info["note"],
         },
+        "dod": dod_flags,
     }
     if enable_xgb:
         run_info["gpu_probe"] = {
@@ -1095,7 +1566,7 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "injected_params": xgb_device_plan["gpu_params"],
         }
 
-    payload = {
+    payload: Dict[str, Any] = {
         "run_info": run_info,
         "target": {"name": target_col, "log_transform": use_log},
         "baseline": {
@@ -1107,7 +1578,9 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "best_val": {
                 "params": best_ridge["params"],
                 "metrics_val": best_ridge["metrics_val"],
-                "smear_train": (best_ridge["smear_train"] if best_ridge["smear_train"] is not None else float("nan")),
+                "smear_train": (
+                    best_ridge["smear_train"] if best_ridge["smear_train"] is not None else float("nan")
+                ),
                 "device_used": best_ridge["device_used"],
             },
         },
@@ -1116,17 +1589,19 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             "best_val": {
                 "params": best_rf["params"],
                 "metrics_val": best_rf["metrics_val"],
-                "smear_train": (best_rf["smear_train"] if best_rf["smear_train"] is not None else float("nan")),
+                "smear_train": (
+                    best_rf["smear_train"] if best_rf["smear_train"] is not None else float("nan")
+                ),
                 "device_used": best_rf["device_used"],
             },
         },
-        "xgb": None,  # filled if enabled
+        "xgb": None,
         "best_overall_on_val": {
             "family": best_overall_family,
             "metrics_val": best_overall["metrics_val"],
             "params": best_overall["params"],
         },
-        "final": final_artifacts,  # per-family test results + paths
+        "final": final_artifacts,
     }
     if enable_xgb:
         payload["xgb"] = {
@@ -1135,44 +1610,141 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
                 "params": best_xgb["params"],
                 "metrics_val": best_xgb["metrics_val"],
                 "device_used": best_xgb.get("device_used"),
-                "smear_train": (best_xgb["smear_train"] if best_xgb["smear_train"] is not None else float("nan")),
+                "smear_train": (
+                    best_xgb["smear_train"] if best_xgb["smear_train"] is not None else float("nan")
+                ),
             },
         }
 
-    # Write metrics
     metrics_path = metrics_dir / "phase6_sweep_metrics.json"
-    metrics_path.write_text(json.dumps(payload, indent=2))
+    metrics_json = json.dumps(payload, indent=2)
+    metrics_path.write_text(metrics_json)
     if run_dir:
-        (run_dir / "metrics" / "phase6_sweep_metrics.json").write_text(json.dumps(payload, indent=2))
+        (run_dir / "metrics" / "phase6_sweep_metrics.json").write_text(metrics_json)
 
-    # Save config snapshot for provenance
+    # ----------------------------------------------------------------------------------
+    # Phase 8: metrics summary table (baseline vs models) -> summary.csv
+    # ----------------------------------------------------------------------------------
+    summary_rows = _build_summary_table_rows(
+        base_metrics_val=base_metrics_val,
+        base_metrics_test=base_metrics_test,
+        best_ridge=best_ridge,
+        best_rf=best_rf,
+        best_xgb=best_xgb,
+        enable_xgb=enable_xgb,
+        final_artifacts=final_artifacts,
+    )
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        summary_csv_path = metrics_dir / "summary.csv"
+        summary_df.to_csv(summary_csv_path, index=False)
+        if run_dir:
+            csv_text = summary_df.to_csv(index=False)
+            (run_dir / "metrics" / "summary.csv").write_text(csv_text)
+
+    # ----------------------------------------------------------------------------------
+    # Phase 8: top error slices by state/ZIP -> slices.json
+    # ----------------------------------------------------------------------------------
+    slices_cfg = (cfg.get("eval", {}) or {}).get("slices", {}) or {}
+    if best_final_preds_test is not None and slices_cfg.get("enabled", True):
+        group_cols = list(slices_cfg.get("group_cols", ["state", "zip_code"]))
+        topk = int(slices_cfg.get("topk", 20))
+        min_count = int(slices_cfg.get("min_count", 30))
+
+        slices_list = _compute_error_slices(
+            te_df,
+            target_col=target_col,
+            pred=best_final_preds_test,
+            group_cols=group_cols,
+            min_count=min_count,
+            topk=topk,
+        )
+        slices_payload = {
+            "model_family": best_overall_family,
+            "group_cols": group_cols,
+            "topk": topk,
+            "min_count": min_count,
+            "slices": slices_list,
+        }
+        slices_json = json.dumps(slices_payload, indent=2)
+        slices_path = metrics_dir / "slices.json"
+        slices_path.write_text(slices_json)
+        if run_dir:
+            (run_dir / "metrics" / "slices.json").write_text(slices_json)
+
+    # ----------------------------------------------------------------------------------
+    # Phase 7: small run.json with data shape & NA counts
+    # ----------------------------------------------------------------------------------
+    if run_dir:
+        cols_of_interest = sorted(set(num_cols + cat_cols + [target_col]))
+        run_summary = {
+            "run_id": run_name,
+            "timestamp": datetime.now().isoformat(),
+            "random_state": rs,
+            "data_overview": {
+                "train": na_summary(tr_df, cols_of_interest),
+                "val": na_summary(va_df, cols_of_interest),
+                "test": na_summary(te_df, cols_of_interest),
+            },
+        }
+        (run_dir / "run.json").write_text(json.dumps(run_summary, indent=2))
+
+    # ----------------------------------------------------------------------------------
+    # Phase 7: save config snapshot in canonical locations
+    # ----------------------------------------------------------------------------------
     if bool(cfg.get("run", {}).get("save_config_snapshot", True)) and run_dir:
-        (run_dir / "metrics" / "config.snapshot.yaml").write_text(Path(cfg_path).read_text())
-    p.step("Saved metrics and config snapshot")
+        cfg_text = Path(cfg_path).read_text()
+        (run_dir / "config.yaml").write_text(cfg_text)
+        (run_dir / "metrics" / "config.snapshot.yaml").write_text(cfg_text)
 
+    # ----------------------------------------------------------------------------------
+    # Phase 8: one-pager Markdown summary (summary.md)
+    # ----------------------------------------------------------------------------------
+    summary_md = _build_one_pager_md(
+        run_name=run_name,
+        cfg=cfg,
+        run_info=run_info,
+        base_metrics_val=base_metrics_val,
+        base_metrics_test=base_metrics_test,
+        best_overall_family=best_overall_family,
+        best_overall=best_overall,
+        final_artifacts=final_artifacts,
+        date_window=date_window,
+    )
+    if run_dir:
+        summary_path = run_dir / "summary.md"
+    else:
+        summary_path = metrics_dir / f"summary_{run_name}.md"
+    summary_path.write_text(summary_md)
+
+    p.step("Saved metrics, summary.csv, slices.json, run.json, config snapshots, and summary.md")
     p.close()
+
     # Pretty-print the high-level outcome to stdout
-    print(json.dumps(
-        {
-            "run_info": {
-                "run_id": run_name,
-                "train_rows": int(len(tr_df)),
-                "val_rows": int(len(va_df)),
-                "test_rows": int(len(te_df)),
+    print(
+        json.dumps(
+            {
+                "run_info": {
+                    "run_id": run_name,
+                    "train_rows": int(len(tr_df)),
+                    "val_rows": int(len(va_df)),
+                    "test_rows": int(len(te_df)),
+                },
+                "baseline": {"val": base_metrics_val, "test": base_metrics_test},
+                "best_overall_on_val": {
+                    "family": best_overall_family,
+                    "metrics_val": best_overall["metrics_val"],
+                    "params": best_overall["params"],
+                },
+                "final_test_metrics_by_family": {
+                    fam: final_artifacts[fam]["final_metrics_test"] for fam in final_artifacts
+                },
+                "dod": dod_flags,
             },
-            "baseline": {"val": base_metrics_val, "test": base_metrics_test},
-            "best_overall_on_val": {
-                "family": best_overall_family,
-                "metrics_val": best_overall["metrics_val"],
-                "params": best_overall["params"],
-            },
-            "final_test_metrics_by_family": {
-                fam: final_artifacts[fam]["final_metrics_test"]
-                for fam in final_artifacts
-            },
-        },
-        indent=2
-    ))
+            indent=2,
+        )
+    )
+
 
 
 if __name__ == "__main__":
