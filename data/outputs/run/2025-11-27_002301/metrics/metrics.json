@@ -1,0 +1,78 @@
+{
+  "run_info": {
+    "run_id": "2025-11-27_002301",
+    "random_state": 0,
+    "data_csv": "data/raw/usa_real_estate.csv",
+    "data_hash": "sha256:2678a7d0a1054861464d0dbdf938c133ffd3e5c5f22c8065255bab87e9af0de4",
+    "train_rows": 1102136,
+    "test_rows": 499,
+    "cutoff": "2023-01-01T00:00:00",
+    "val_cutoff": null,
+    "feature_counts": {
+      "numeric": 6,
+      "categorical": 3
+    },
+    "model_kind": "xgboost",
+    "log_target": true,
+    "required_columns_relaxed": false,
+    "device_requested": "auto",
+    "device_used": "gpu"
+  },
+  "target": {
+    "name": "price",
+    "log_transform": true
+  },
+  "baseline": {
+    "MAE": 147494.95490981964,
+    "RMSE": 282700.133671715,
+    "R2": 0.1565814722792217
+  },
+  "model": {
+    "kind": "xgboost",
+    "params": {
+      "objective": "reg:squarederror",
+      "base_score": null,
+      "booster": null,
+      "callbacks": null,
+      "colsample_bylevel": null,
+      "colsample_bynode": null,
+      "colsample_bytree": 0.8,
+      "device": "cuda",
+      "early_stopping_rounds": null,
+      "enable_categorical": false,
+      "eval_metric": null,
+      "feature_types": null,
+      "feature_weights": null,
+      "gamma": null,
+      "grow_policy": null,
+      "importance_type": null,
+      "interaction_constraints": null,
+      "learning_rate": 0.05,
+      "max_bin": null,
+      "max_cat_threshold": null,
+      "max_cat_to_onehot": null,
+      "max_delta_step": null,
+      "max_depth": 8,
+      "max_leaves": null,
+      "min_child_weight": null,
+      "missing": NaN,
+      "monotone_constraints": null,
+      "multi_strategy": null,
+      "n_estimators": 1200,
+      "n_jobs": -1,
+      "num_parallel_tree": null,
+      "random_state": 0,
+      "reg_alpha": 0.0,
+      "reg_lambda": 1.0,
+      "sampling_method": null,
+      "scale_pos_weight": null,
+      "subsample": 0.8,
+      "tree_method": "hist",
+      "validate_parameters": null,
+      "verbosity": 0
+    },
+    "MAE": 106195.44877254509,
+    "RMSE": 179081.70735429402,
+    "R2": 0.6615507453850638
+  }
+}

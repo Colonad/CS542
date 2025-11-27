@@ -105,9 +105,9 @@
     },
     "city": {
       "dtype": "object",
-      "non_null": 1102485,
-      "nulls": 150,
-      "null_pct": 0.013603776408330952,
+      "non_null": 1102635,
+      "nulls": 0,
+      "null_pct": 0.0,
       "min": null,
       "max": null
     },
@@ -120,19 +120,12 @@
       "max": null
     },
     "zip_code": {
-      "dtype": "float64",
-      "non_null": 1102621,
-      "nulls": 14,
-      "null_pct": 0.0012696857981108888,
-      "min": 602.0,
-      "p1": 1862.0,
-      "p5": 8902.0,
-      "p50": 55443.0,
-      "p95": 97138.0,
-      "p99": 98621.0,
-      "max": 99901.0,
-      "mean": 55847.73060734377,
-      "std": 29994.54141955252
+      "dtype": "object",
+      "non_null": 1102635,
+      "nulls": 0,
+      "null_pct": 0.0,
+      "min": "1701-01-01T00:00:00",
+      "max": "2215-01-01T00:00:00"
     },
     "house_size": {
       "dtype": "float64",

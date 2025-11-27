@@ -28,13 +28,10 @@ except Exception:
 # --------------------------------------------------------------------------- #
 def _gpu_available() -> bool:
     """
-    Heuristic GPU check:
-      1) CUDA_VISIBLE_DEVICES is set and not '-1'
-      2) 'nvidia-smi -L' returns at least one GPU
+    Conservative GPU check: require nvidia-smi to report at least one GPU.
+    Avoids false positives when CUDA_VISIBLE_DEVICES is set but no GPU
+    is actually accessible in the runtime.
     """
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if cvd and cvd != "-1":
-        return True
     try:
         out = subprocess.run(
             ["nvidia-smi", "-L"],
@@ -44,7 +41,8 @@ def _gpu_available() -> bool:
             text=True,
             timeout=2,
         )
-        return (out.returncode == 0) and ("GPU" in (out.stdout or ""))
+        txt = (out.stdout or "")
+        return (out.returncode == 0) and ("GPU" in txt)
     except Exception:
         return False
 
@@ -231,21 +229,38 @@ def make_model(
             "predictor",
             "n_jobs",
             "random_state",
+
+            "device",        # XGBoost ≥ 2.x
+            "verbosity",     # used by probe
+            "objective",     # let cfg override if provided
         }
         xgb_cfg = {}
         if isinstance(cfg, Mapping):
             xgb_cfg = cfg.get("model", {}).get("xgboost", {}) or {}
         params = _subset(xgb_cfg, allowed)
 
-        # Auto-choose backend
-        if _gpu_available():
-            params.setdefault("tree_method", "gpu_hist")
-            params.setdefault("predictor", "gpu_predictor")
+        # Respect explicit config first (from train.py probe). Only choose automatically
+        # if neither 'device' nor 'tree_method' was provided.
+        if "device" in xgb_cfg:
+            # XGBoost ≥2.x path (e.g., device='cuda'); choose a safe default tree_method if absent.
+            params.setdefault("tree_method", xgb_cfg.get("tree_method", "hist"))
+            # Avoid mixing old GPU predictor with the ≥2.x device API unless user explicitly set it.
+            if params.get("device", "").lower() in {"cuda", "gpu"}:
+                params.pop("predictor", None)
+        elif "tree_method" in xgb_cfg:
+            # User already chose (e.g., 'gpu_hist' for XGBoost 1.x). Do nothing.
+            pass
         else:
-            params.setdefault("tree_method", "hist")
-            # predictor left default (xgboost will pick cpu_predictor)
+            # Neither specified: pick based on local GPU heuristic.
+            if _gpu_available():
+                # XGBoost 1.x style defaults
+                params.setdefault("tree_method", "gpu_hist")
+                params.setdefault("predictor", "gpu_predictor")
+            else:
+                params.setdefault("tree_method", "hist")
 
-        params.setdefault("objective", "reg:squarederror")
+        params.setdefault("objective", xgb_cfg.get("objective", "reg:squarederror"))
+
         est = XGBRegressor(**params)
 
     else:
@@ -274,11 +289,16 @@ def describe_estimator(pipe: Pipeline) -> str:
             return "unknown"
         name = mdl.__class__.__name__.lower()
         if name == "xgbregressor":
-            # Try direct attr, then params
+            # Try direct attributes, then estimator params
             tm = getattr(mdl, "tree_method", None)
-            if not tm and hasattr(mdl, "get_xgb_params"):
-                tm = mdl.get_xgb_params().get("tree_method")
-            return f"xgboost [{tm}]" if tm else "xgboost"
+            dev = getattr(mdl, "device", None)
+            if hasattr(mdl, "get_xgb_params"):
+                params = mdl.get_xgb_params()
+                tm = tm or params.get("tree_method")
+                dev = dev or params.get("device")
+            if dev is not None:
+                return f"xgboost [{tm or 'hist'}|device={dev}]"
+            return f"xgboost [{tm or 'hist'}]"
         return name
     except Exception:
         return "unknown"

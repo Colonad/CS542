@@ -1,0 +1,183 @@
+{
+  "run_info": {
+    "phase": "6",
+    "run_id": "2025-11-27_012613",
+    "random_state": 0,
+    "data_csv": "data/raw/usa_real_estate.csv",
+    "data_hash": "sha256:2678a7d0a1054861464d0dbdf938c133ffd3e5c5f22c8065255bab87e9af0de4",
+    "train_rows": 1102136,
+    "val_rows": 495,
+    "trainval_rows": 1102631,
+    "test_rows": 4,
+    "split_years": {
+      "train_max": 2022,
+      "val": 2023,
+      "test_min": 2024
+    },
+    "feature_counts": {
+      "numeric": 7,
+      "categorical": 3
+    },
+    "model_kind": "xgboost",
+    "log_target": true,
+    "device_requested": "auto",
+    "device_used_val_best": "gpu",
+    "device_used_final": "gpu"
+  },
+  "target": {
+    "name": "price",
+    "log_transform": true,
+    "duan_smearing_val_best": 1.0649353315981418,
+    "duan_smearing_final": 1.0650024097996424
+  },
+  "tuning": {
+    "trials": [
+      {
+        "index": 1,
+        "candidate": {
+          "n_estimators": 600,
+          "max_depth": 6,
+          "learning_rate": 0.06,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8
+        },
+        "metrics_val": {
+          "MAE": 119777.21912878788,
+          "RMSE": 182965.13220980193,
+          "R2": 0.6463309527951673
+        },
+        "smear_train": 1.0825190892158223,
+        "device_used": "gpu"
+      },
+      {
+        "index": 2,
+        "candidate": {
+          "n_estimators": 900,
+          "max_depth": 8,
+          "learning_rate": 0.05,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8
+        },
+        "metrics_val": {
+          "MAE": 111857.87225378788,
+          "RMSE": 174881.59622915907,
+          "R2": 0.6768913371220537
+        },
+        "smear_train": 1.0719006128796797,
+        "device_used": "gpu"
+      },
+      {
+        "index": 3,
+        "candidate": {
+          "n_estimators": 1200,
+          "max_depth": 8,
+          "learning_rate": 0.05,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8
+        },
+        "metrics_val": {
+          "MAE": 110587.51158459597,
+          "RMSE": 172189.16315134746,
+          "R2": 0.6867637504174082
+        },
+        "smear_train": 1.0681681117956123,
+        "device_used": "gpu"
+      },
+      {
+        "index": 4,
+        "candidate": {
+          "n_estimators": 1200,
+          "max_depth": 10,
+          "learning_rate": 0.04,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8
+        },
+        "metrics_val": {
+          "MAE": 105332.28475378788,
+          "RMSE": 170207.13984461827,
+          "R2": 0.6939334045996177
+        },
+        "smear_train": 1.0649353315981418,
+        "device_used": "gpu"
+      }
+    ],
+    "best_params": {
+      "n_estimators": 1200,
+      "max_depth": 10,
+      "learning_rate": 0.04,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8
+    },
+    "best_val_metrics": {
+      "MAE": 105332.28475378788,
+      "RMSE": 170207.13984461827,
+      "R2": 0.6939334045996177
+    }
+  },
+  "val": {
+    "baseline": {
+      "MAE": 147758.04545454544,
+      "RMSE": 283600.1832532238,
+      "R2": 0.15028477667437057
+    },
+    "model": {
+      "MAE": 105332.28475378788,
+      "RMSE": 170207.13984461827,
+      "R2": 0.6939334045996177
+    }
+  },
+  "test": {
+    "baseline": {
+      "MAE": 114937.5,
+      "RMSE": 129785.18068331222,
+      "R2": 0.3617357706286013
+    },
+    "model": {
+      "MAE": 154174.40234375,
+      "RMSE": 171049.18903581044,
+      "R2": -0.10864456567814718
+    }
+  },
+  "final_model_params": {
+    "base_score": null,
+    "booster": null,
+    "callbacks": null,
+    "colsample_bylevel": null,
+    "colsample_bynode": null,
+    "colsample_bytree": 0.8,
+    "device": "cuda",
+    "early_stopping_rounds": null,
+    "enable_categorical": false,
+    "eval_metric": null,
+    "feature_types": null,
+    "feature_weights": null,
+    "gamma": null,
+    "grow_policy": null,
+    "importance_type": null,
+    "interaction_constraints": null,
+    "learning_rate": 0.04,
+    "max_bin": null,
+    "max_cat_threshold": null,
+    "max_cat_to_onehot": null,
+    "max_delta_step": null,
+    "max_depth": 10,
+    "max_leaves": null,
+    "min_child_weight": null,
+    "missing": null,
+    "monotone_constraints": null,
+    "multi_strategy": null,
+    "n_estimators": 1200,
+    "n_jobs": -1,
+    "num_parallel_tree": null,
+    "objective": "reg:squarederror",
+    "random_state": 0,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
+    "sampling_method": null,
+    "scale_pos_weight": null,
+    "subsample": 0.8,
+    "tree_method": "hist",
+    "validate_parameters": null,
+    "verbosity": 0
+  }
+}

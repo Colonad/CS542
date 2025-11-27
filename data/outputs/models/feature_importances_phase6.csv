@@ -1,0 +1,11 @@
+group,importance
+city,0.4751559
+zip_code,0.37843928
+state,0.14404349
+bath,0.0017557142
+house_size,0.0004594086
+acre_lot,5.6622597e-05
+bed,4.2233587e-05
+year,3.346082e-05
+month,1.3897443e-05
+zip_year_price_median,0.0

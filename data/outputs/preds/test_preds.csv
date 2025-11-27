@@ -1,0 +1,5 @@
+sold_date,city,state,zip_code,price,pred_baseline,pred_model
+2024-04-17,Clarkesville,Georgia,30523,459900.0,321450.0,733151.5
+2026-04-08,Gainesville,Georgia,30506,235000.0,400400.0,304578.97
+2024-03-31,Dawsonville,Georgia,30534,409000.0,397000.0,275389.06
+2024-10-01,Paragould,Arkansas,72450,46000.0,189900.0,186256.2
