@@ -13,7 +13,7 @@
 
 # You can override these on the CLI:
 #   make train PYTHON=python3
-ENV_NAME   ?= CS542-Project-GPU
+ENV_NAME   ?= CS542-Project
 PYTHON     ?= python
 PYTHONPATH ?= src
 export PYTHONPATH

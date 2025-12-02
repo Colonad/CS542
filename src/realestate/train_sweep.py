@@ -60,7 +60,8 @@ import pandas as pd
 import yaml
 
 from sklearn.linear_model import Ridge
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import FunctionTransformer
@@ -467,6 +468,28 @@ def _build_rf(spec: dict, rs: int, use_cuml: bool, cu_info: dict):
         n_jobs=-1,
         random_state=int(rs),
     ), "cpu(sklearn)"
+
+
+
+def _build_fast_rf_substitute(rs: int):
+    """
+    Very fast RF-like tree ensemble just for fast_sweep mode.
+
+    We use ExtraTreesRegressor with a modest number of shallow trees. This is
+    typically much faster than a big RandomForest while still providing a
+    non-linear tree baseline.
+    """
+    est = ExtraTreesRegressor(
+        n_estimators=80,       # small-ish forest
+        max_depth=12,          # shallow trees
+        min_samples_leaf=2,
+        n_jobs=-1,
+        random_state=rs,
+    )
+    return est, "cpu(extra_trees_fast)"
+
+
+
 
 
 def _prep_features_and_split(cfg: Mapping[str, Any], p: Prog) -> tuple[
@@ -1009,13 +1032,36 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         (run_dir / "preds").mkdir(parents=True, exist_ok=True)
         (run_dir / "models").mkdir(parents=True, exist_ok=True)
 
+    run_cfg = cfg.get("run", {}) or {}
+
     # --- Phase 7: lock random_state globally for reproducibility ---
-    rs = int(cfg.get("run", {}).get("random_state", 0))
+    rs = int(run_cfg.get("random_state", 0))
     set_global_seed(rs)
+
+    # Device mode: 'auto' | 'gpu' | 'cpu'
+    device_mode = str(run_cfg.get("device", "auto")).lower()
+    cpu_only = device_mode == "cpu"
+
+    # Fast-sweep toggles (for quicker experimentation)
+    fast_sweep = bool(run_cfg.get("fast_sweep", False))
+    max_train_rows_cfg = run_cfg.get("max_train_rows", None)
+    max_train_rows = int(max_train_rows_cfg) if max_train_rows_cfg not in (None, "", 0) else None
+
+    # In fast_sweep (turbo) mode, if user didn't specify a cap, set an aggressive default.
+    if fast_sweep and max_train_rows is None:
+        max_train_rows = 50000
+
+    # In fast_sweep (turbo) mode, if user didn't specify a cap, set an aggressive default.
+    # This keeps all the logic the same, but makes sweeps MUCH cheaper automatically.
+    if fast_sweep and max_train_rows is None:
+        # You can bump this up later if you want slower but more accurate sweeps.
+        max_train_rows = 50000
 
     # Rough step count for progress bar
     total_steps = 20
-    p = Prog(enabled=True, total=total_steps, desc="Phase 6–8: Sweep + Artifacts")
+
+    desc = "Phase 6–8: FAST sweep + Artifacts" if fast_sweep else "Phase 6–8: Sweep + Artifacts"
+    p = Prog(enabled=True, total=total_steps, desc=desc)
 
     # ----------------------------------------------------------------------------------
     # Data, features, split
@@ -1041,6 +1087,20 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
             date_window = {"min": None, "max": None}
     else:
         date_window = {"min": None, "max": None}
+
+
+
+    # Optional: downsample TRAIN for faster sweeps (keep val/test full)
+    if fast_sweep and max_train_rows is not None and len(tr_df) > max_train_rows:
+        orig_n = len(tr_df)
+        tr_df = (
+            tr_df.sample(n=max_train_rows, random_state=rs)
+            .sort_values("sold_date")
+            .reset_index(drop=True)
+        )
+        p.step(f"Downsampled train from {orig_n} to {len(tr_df)} rows for fast sweep")
+
+
 
 
     # ----------------------------------------------------------------------------------
@@ -1086,16 +1146,18 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     # Build grids (overrideable via config.sweep.*) and probe device backends
     # ----------------------------------------------------------------------------------
     sweep_cfg = cfg.get("sweep", {}) or {}
-    enable_xgb = bool(sweep_cfg.get("xgb", {}).get("enabled", True))
+    xgb_cfg = sweep_cfg.get("xgb", {}) or {}
+    enable_xgb = bool(xgb_cfg.get("enabled", True))
 
     # --- cuML banner / toggles ---
     cu_cfg = sweep_cfg.get("use_cuml", {}) or {}
-    cu_global = bool(cu_cfg.get("enabled", False))
+    # In CPU-only mode, FORCE cuML off regardless of config.
+    cu_global = (not cpu_only) and bool(cu_cfg.get("enabled", False))
     cu_for_ridge = cu_global and bool(cu_cfg.get("ridge", False))
     cu_for_rf = cu_global and bool(cu_cfg.get("rf", False))
-    cu_info = _probe_cuml()
 
     if cu_global:
+        cu_info = _probe_cuml()
         print(
             f"[cuML] requested=True available={cu_info['available']} "
             f"note={cu_info['note']} ver={cu_info['version']}"
@@ -1103,7 +1165,14 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         if not cu_info["available"]:
             print("[cuML] Falling back to sklearn for Ridge/RF.")
     else:
-        print("[cuML] requested=False (Ridge/RF default to sklearn)")
+        # Stub metadata; no probing, no noisy banner in CPU-only mode.
+        cu_info = {
+            "available": False,
+            "version": None,
+            "ridge_cls": None,
+            "rf_cls": None,
+            "note": "cuML disabled (cpu-only mode or config).",
+        }
 
     # --- XGBoost GPU probe ---
     xgb_device_plan: Dict[str, Any] = {
@@ -1112,11 +1181,18 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         "gpu_params": {},
     }
     if enable_xgb:
-        gpu_ok, note, gpu_params = _probe_xgb_gpu()
-        xgb_device_plan.update({"gpu_ok": gpu_ok, "note": note, "gpu_params": gpu_params})
-        print(f"[GPU probe] ok={gpu_ok} note={note}")
-        planned = "gpu(auto)" if gpu_ok else "cpu(hist)"
-        print(f"[Device] requested=auto  planned={planned}  (Ridge/RF via cuML if enabled)")
+        if cpu_only:
+            # Do NOT probe GPU on a CPU-only env; just use CPU hist.
+            xgb_device_plan["gpu_ok"] = False
+            xgb_device_plan["note"] = "CPU-only mode: skipping GPU probe; using tree_method='hist'."
+            xgb_device_plan["gpu_params"] = {}
+            print("[Device] CPU-only mode: using XGBoost tree_method='hist' (no GPU probe).")
+        else:
+            gpu_ok, note, gpu_params = _probe_xgb_gpu()
+            xgb_device_plan.update({"gpu_ok": gpu_ok, "note": note, "gpu_params": gpu_params})
+            print(f"[GPU probe] ok={gpu_ok} note={note}")
+            planned = "gpu(auto)" if gpu_ok else "cpu(hist)"
+            print(f"[Device] requested=auto  planned={planned}  (Ridge/RF via cuML if enabled)")
     else:
         print("[Device] XGB disabled by config")
 
@@ -1150,6 +1226,40 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         "objective": ["reg:squarederror"],
         # device/tree_method injected after GPU probe
     }
+
+
+    # If fast_sweep is enabled, drastically shrink the grids to a few sensible points
+    if fast_sweep:
+        print("[FAST] Using reduced hyperparameter grids for quicker sweep.")
+
+        # Ridge: just two reasonable alphas
+        ridge_grid = [1.0, 2.0]
+
+        # RF: one mid-size forest config
+        rf_grid = {
+            "n_estimators": [200],   # fewer trees than full sweep
+            "min_samples_leaf": [2],
+            "max_depth": [20],
+            "random_state": [rs],
+            "n_jobs": [-1],
+        }
+
+        # XGB: single, moderate configuration (if enabled)
+        xgb_grid = {
+            "learning_rate": [0.05],
+            "max_depth": [6],
+            "n_estimators": [400],   # much smaller than 1200
+            "subsample": [0.8],
+            "colsample_bytree": [0.8],
+            "random_state": [rs],
+            "verbosity": [0],
+            "objective": ["reg:squarederror"],
+        }
+
+
+
+
+
 
     # ----------------------------------------------------------------------------------
     # Sweep: Ridge
@@ -1204,21 +1314,8 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     p.step("Ridge sweep complete")
 
     # ----------------------------------------------------------------------------------
-    # Sweep: Random Forest
+    # Sweep: Random Forest (disabled entirely in fast_sweep/turbo mode)
     # ----------------------------------------------------------------------------------
-    rf_candidates: List[Dict[str, Any]] = []
-    for n in rf_grid["n_estimators"]:
-        for leaf in rf_grid["min_samples_leaf"]:
-            for depth in rf_grid["max_depth"]:
-                rf_candidates.append(
-                    {"n_estimators": int(n), "min_samples_leaf": int(leaf), "max_depth": depth}
-                )
-
-    if tqdm is not None:
-        tq = tqdm(total=len(rf_candidates), desc="RF sweep", leave=True)
-    else:
-        tq = None
-
     trials_rf: List[Dict[str, Any]] = []
     best_rf: Dict[str, Any] = {
         "params": None,
@@ -1227,47 +1324,72 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
         "device_used": None,
     }
 
-    for spec in rf_candidates:
-        est, dev_hint = _build_rf(spec, rs=rs, use_cuml=cu_for_rf, cu_info=cu_info)
-        if _is_cuml_estimator(est) and "min_samples_leaf" in spec:
-            # Warn once that min_samples_leaf is ignored for cuML
-            warnings.warn(
-                "cuML RF: 'min_samples_leaf' not used; using n_estimators/max_depth.",
-                RuntimeWarning,
+    if fast_sweep:
+        # Nuclear option: skip RF family completely to minimize runtime.
+        # RF (and even the ExtraTrees "fast substitute") can still be expensive on
+        # large datasets, so in turbo mode we just don't train any RF model at all.
+        print("[FAST] Turbo mode: skipping Random Forest family entirely.")
+        p.step("RF sweep skipped (turbo mode)")
+    else:
+        # FULL PATH: RandomForest grid (optionally with cuML on GPU)
+        rf_candidates: List[Dict[str, Any]] = []
+        for n in rf_grid["n_estimators"]:
+            for leaf in rf_grid["min_samples_leaf"]:
+                for depth in rf_grid["max_depth"]:
+                    rf_candidates.append(
+                        {
+                            "n_estimators": int(n),
+                            "min_samples_leaf": int(leaf),
+                            "max_depth": depth,
+                        }
+                    )
+
+        if tqdm is not None:
+            tq = tqdm(total=len(rf_candidates), desc="RF sweep", leave=True)
+        else:
+            tq = None
+
+        for spec in rf_candidates:
+            est, dev_hint = _build_rf(spec, rs=rs, use_cuml=cu_for_rf, cu_info=cu_info)
+            if _is_cuml_estimator(est) and "min_samples_leaf" in spec:
+                # Warn once that min_samples_leaf is ignored for cuML
+                warnings.warn(
+                    "cuML RF: 'min_samples_leaf' not used; using n_estimators/max_depth.",
+                    RuntimeWarning,
+                )
+
+            metrics_val, smear, _ = _fit_eval_one_matrix(
+                est,
+                X_tr_enc,
+                y_tr,
+                X_va_enc,
+                y_va,
+                use_log=use_log,
             )
 
-        metrics_val, smear, _ = _fit_eval_one_matrix(
-            est,
-            X_tr_enc,
-            y_tr,
-            X_va_enc,
-            y_va,
-            use_log=use_log,
-        )
+            trial = {
+                "params": deepcopy(spec),
+                "metrics_val": metrics_val,
+                "smear_train": smear,
+                "device_used": dev_hint,
+            }
+            trials_rf.append(trial)
 
-        trial = {
-            "params": deepcopy(spec),
-            "metrics_val": metrics_val,
-            "smear_train": smear,
-            "device_used": dev_hint,
-        }
-        trials_rf.append(trial)
+            if (best_rf["metrics_val"] is None) or (metrics_val["R2"] > best_rf["metrics_val"]["R2"]):
+                best_rf.update(
+                    params=trial["params"],
+                    metrics_val=metrics_val,
+                    smear_train=smear,
+                    device_used=dev_hint,
+                )
 
-        if (best_rf["metrics_val"] is None) or (metrics_val["R2"] > best_rf["metrics_val"]["R2"]):
-            best_rf.update(
-                params=trial["params"],
-                metrics_val=metrics_val,
-                smear_train=smear,
-                device_used=dev_hint,
-            )
+            if tq:
+                tq.set_postfix_str(f"{spec} R2={metrics_val['R2']:.3f}", refresh=True)
+                tq.update(1)
 
         if tq:
-            tq.set_postfix_str(f"{spec} R2={metrics_val['R2']:.3f}", refresh=True)
-            tq.update(1)
-
-    if tq:
-        tq.close()
-    p.step("Random Forest sweep complete")
+            tq.close()
+        p.step("Random Forest sweep complete")
 
     # ----------------------------------------------------------------------------------
     # Sweep: XGBoost (optional)
@@ -1402,7 +1524,12 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
     best_final_preds_test: Optional[np.ndarray] = None
 
     for fam, best in (("ridge", best_ridge), ("rf", best_rf), ("xgb", best_xgb)):
-        if fam == "xgb" and (not enable_xgb or best["metrics_val"] is None):
+        # Skip families that never produced a validation metric (e.g., RF in turbo mode,
+        # or XGB when disabled / failed).
+        if best.get("metrics_val") is None:
+            continue
+        # Respect XGB enable flag
+        if fam == "xgb" and not enable_xgb:
             continue
 
         # Rebuild estimator from best params
@@ -1414,7 +1541,14 @@ def run(cfg_path: str = "configs/config.yaml") -> None:
                 cu_info=cu_info,
             )
         elif fam == "rf":
-            est, dev_hint = _build_rf(best["params"], rs=rs, use_cuml=cu_for_rf, cu_info=cu_info)
+            # In fast_sweep turbo mode we never trained RF, so this branch is only
+            # reached in full mode where best_rf["metrics_val"] is not None.
+            est, dev_hint = _build_rf(
+                best["params"],
+                rs=rs,
+                use_cuml=cu_for_rf,
+                cu_info=cu_info,
+            )
         else:  # xgb
             from xgboost import XGBRegressor
             est = XGBRegressor(**best["params"])

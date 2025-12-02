@@ -1,0 +1,247 @@
+{
+  "run_info": {
+    "phase": "6",
+    "run_id": "2025-11-30_203109",
+    "random_state": 0,
+    "data_csv": "data/raw/usa_real_estate.csv",
+    "data_hash": "sha256:2678a7d0a1054861464d0dbdf938c133ffd3e5c5f22c8065255bab87e9af0de4",
+    "train_rows": 50000,
+    "val_rows": 460233,
+    "test_rows": 499,
+    "split_years": {
+      "train_max": 2021,
+      "val": 2022,
+      "test_min": 2023
+    },
+    "feature_counts": {
+      "numeric": 10,
+      "categorical": 3
+    },
+    "date_window": {
+      "min": "1901-01-01",
+      "max": "2026-04-08"
+    },
+    "gpu_probe": {
+      "ok": false,
+      "note": "xgboost 3.0.5 GPU probe failed; modern recipe used=cpu | legacy recipe failed: [20:31:22] /home/conda/feedstock_root/build_artifacts/xgboost-split_1758007966380/work/src/c_api/../common/common.h:181: XGBoost version not compiled with GPU support.\nStack trace:\n  [bt] (0) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(dmlc::LogMessageFatal::~LogMessageFatal()+0x6e) [0x7d77d72ce57e]\n  [bt] (1) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(xgboost::common::AssertGPUSupport()+0x3b) [0x7d77d72ce81b]\n  [bt] (2) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(xgboost::gbm::GBTree::Configure(std::vector<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > > const&)+0x1d1b) [0x7d77d76a21fb]\n  [bt] (3) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(xgboost::LearnerConfiguration::Configure()+0xaa8) [0x7d77d76f1b78]\n  [bt] (4) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(xgboost::LearnerImpl::UpdateOneIter(int, std::shared_ptr<xgboost::DMatrix>)+0x6b) [0x7d77d76e872b]\n  [bt] (5) /home/angel/miniconda3/envs/CS542-Project/lib/libxgboost.so(XGBoosterUpdateOneIter+0x4f) [0x7d77d7238c1f]\n  [bt] (6) /home/angel/miniconda3/envs/CS542-Project/lib/python3.12/lib-dynload/../../libffi.so.8(+0x6d8a) [0x7d78b0abad8a]\n  [bt] (7) /home/angel/miniconda3/envs/CS542-Project/lib/python3.12/lib-dynload/../../libffi.so.8(+0x61cd) [0x7d78b0aba1cd]\n  [bt] (8) /home/angel/miniconda3/envs/CS542-Project/lib/python3.12/lib-dynload/../../libffi.so.8(ffi_call+0xcd) [0x7d78b0aba91d]\n\n",
+      "injected_params": {}
+    },
+    "cuml": {
+      "requested": {
+        "enabled": true,
+        "ridge": false,
+        "rf": true
+      },
+      "available": false,
+      "version": null,
+      "note": "cuML unavailable: No module named 'cuml'"
+    },
+    "dod": {
+      "metrics_reported_on_test": true,
+      "model_beats_baseline": true
+    }
+  },
+  "target": {
+    "name": "price",
+    "log_transform": true
+  },
+  "baseline": {
+    "val": {
+      "MAE": 203927.33672074796,
+      "RMSE": 449075.7878063618,
+      "R2": 0.3686049858615751
+    },
+    "test": {
+      "MAE": 145896.55611222444,
+      "RMSE": 279283.50731007254,
+      "R2": 0.17684487008946226
+    }
+  },
+  "ridge": {
+    "trials": [
+      {
+        "params": {
+          "alpha": 1.0
+        },
+        "metrics_val": {
+          "MAE": 204110.5263254309,
+          "RMSE": 1928055.2763347002,
+          "R2": -10.638602312259327
+        },
+        "smear_train": 1.13779835589549,
+        "device_used": "cpu(sklearn)"
+      },
+      {
+        "params": {
+          "alpha": 2.0
+        },
+        "metrics_val": {
+          "MAE": 910582.6481661528,
+          "RMSE": 474500828.78998387,
+          "R2": -704912.4836890885
+        },
+        "smear_train": 1.166290434477742,
+        "device_used": "cpu(sklearn)"
+      }
+    ],
+    "best_val": {
+      "params": {
+        "alpha": 1.0
+      },
+      "metrics_val": {
+        "MAE": 204110.5263254309,
+        "RMSE": 1928055.2763347002,
+        "R2": -10.638602312259327
+      },
+      "smear_train": 1.13779835589549,
+      "device_used": "cpu(sklearn)"
+    }
+  },
+  "rf": {
+    "trials": [],
+    "best_val": {
+      "params": null,
+      "metrics_val": null,
+      "smear_train": NaN,
+      "device_used": null
+    }
+  },
+  "xgb": {
+    "trials": [
+      {
+        "params": {
+          "learning_rate": 0.05,
+          "max_depth": 6,
+          "n_estimators": 400,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8,
+          "random_state": 0,
+          "objective": "reg:squarederror",
+          "tree_method": "hist"
+        },
+        "metrics_val": {
+          "MAE": 171879.69156298955,
+          "RMSE": 363835.00859481376,
+          "R2": 0.5855512469832049
+        },
+        "smear_train": 1.0930183123222186,
+        "device_used": "cpu"
+      }
+    ],
+    "best_val": {
+      "params": {
+        "learning_rate": 0.05,
+        "max_depth": 6,
+        "n_estimators": 400,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "random_state": 0,
+        "objective": "reg:squarederror",
+        "tree_method": "hist"
+      },
+      "metrics_val": {
+        "MAE": 171879.69156298955,
+        "RMSE": 363835.00859481376,
+        "R2": 0.5855512469832049
+      },
+      "device_used": "cpu",
+      "smear_train": 1.0930183123222186
+    }
+  },
+  "best_overall_on_val": {
+    "family": "xgb",
+    "metrics_val": {
+      "MAE": 171879.69156298955,
+      "RMSE": 363835.00859481376,
+      "R2": 0.5855512469832049
+    },
+    "params": {
+      "learning_rate": 0.05,
+      "max_depth": 6,
+      "n_estimators": 400,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "random_state": 0,
+      "objective": "reg:squarederror",
+      "tree_method": "hist"
+    }
+  },
+  "final": {
+    "ridge": {
+      "final_metrics_test": {
+        "MAE": 120144.23744363728,
+        "RMSE": 191177.48020764193,
+        "R2": 0.6142867342562046
+      },
+      "smear_trainval": 1.1154279565153704,
+      "model_path": "data/outputs/models/phase6_ridge.pkl",
+      "preds_path": "data/outputs/preds/test_preds_ridge.csv",
+      "feature_importances_path": null,
+      "final_model_params": {
+        "alpha": 1.0,
+        "copy_X": true,
+        "fit_intercept": true,
+        "max_iter": null,
+        "positive": false,
+        "random_state": 0,
+        "solver": "auto",
+        "tol": 0.0001
+      },
+      "device_used_final": "cpu(sklearn)"
+    },
+    "xgb": {
+      "final_metrics_test": {
+        "MAE": 115261.16774173347,
+        "RMSE": 184728.34236567377,
+        "R2": 0.63987093309309
+      },
+      "smear_trainval": 1.0810499737354569,
+      "model_path": "data/outputs/models/phase6_xgb.pkl",
+      "preds_path": "data/outputs/preds/test_preds_xgb.csv",
+      "feature_importances_path": "data/outputs/models/feature_importances_xgb.csv",
+      "final_model_params": {
+        "objective": "reg:squarederror",
+        "base_score": null,
+        "booster": null,
+        "callbacks": null,
+        "colsample_bylevel": null,
+        "colsample_bynode": null,
+        "colsample_bytree": 0.8,
+        "device": null,
+        "early_stopping_rounds": null,
+        "enable_categorical": false,
+        "eval_metric": null,
+        "feature_types": null,
+        "feature_weights": null,
+        "gamma": null,
+        "grow_policy": null,
+        "importance_type": null,
+        "interaction_constraints": null,
+        "learning_rate": 0.05,
+        "max_bin": null,
+        "max_cat_threshold": null,
+        "max_cat_to_onehot": null,
+        "max_delta_step": null,
+        "max_depth": 6,
+        "max_leaves": null,
+        "min_child_weight": null,
+        "missing": null,
+        "monotone_constraints": null,
+        "multi_strategy": null,
+        "n_estimators": 400,
+        "n_jobs": null,
+        "num_parallel_tree": null,
+        "random_state": 0,
+        "reg_alpha": null,
+        "reg_lambda": null,
+        "sampling_method": null,
+        "scale_pos_weight": null,
+        "subsample": 0.8,
+        "tree_method": "hist",
+        "validate_parameters": null,
+        "verbosity": null
+      },
+      "device_used_final": "cpu"
+    }
+  }
+}

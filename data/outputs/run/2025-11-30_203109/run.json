@@ -1,0 +1,115 @@
+{
+  "run_id": "2025-11-30_203109",
+  "timestamp": "2025-11-30T20:34:06.578875",
+  "random_state": 0,
+  "data_overview": {
+    "train": {
+      "rows": 50000,
+      "cols": 14,
+      "na_counts": {
+        "acre_lot": 0,
+        "bath": 484,
+        "bed": 393,
+        "bed_per_bath": 575,
+        "city": 0,
+        "house_size": 0,
+        "log_house_size": 0,
+        "lot_per_size": 0,
+        "month": 0,
+        "price": 0,
+        "season": 0,
+        "state": 0,
+        "year": 0,
+        "zip_code": 0
+      },
+      "na_pct": {
+        "acre_lot": 0.0,
+        "bath": 0.968,
+        "bed": 0.786,
+        "bed_per_bath": 1.15,
+        "city": 0.0,
+        "house_size": 0.0,
+        "log_house_size": 0.0,
+        "lot_per_size": 0.0,
+        "month": 0.0,
+        "price": 0.0,
+        "season": 0.0,
+        "state": 0.0,
+        "year": 0.0,
+        "zip_code": 0.0
+      }
+    },
+    "val": {
+      "rows": 460233,
+      "cols": 14,
+      "na_counts": {
+        "acre_lot": 0,
+        "bath": 6015,
+        "bed": 5023,
+        "bed_per_bath": 6702,
+        "city": 0,
+        "house_size": 0,
+        "log_house_size": 0,
+        "lot_per_size": 0,
+        "month": 0,
+        "price": 0,
+        "season": 0,
+        "state": 0,
+        "year": 0,
+        "zip_code": 0
+      },
+      "na_pct": {
+        "acre_lot": 0.0,
+        "bath": 1.3069466987373788,
+        "bed": 1.0914037020378808,
+        "bed_per_bath": 1.4562189152016478,
+        "city": 0.0,
+        "house_size": 0.0,
+        "log_house_size": 0.0,
+        "lot_per_size": 0.0,
+        "month": 0.0,
+        "price": 0.0,
+        "season": 0.0,
+        "state": 0.0,
+        "year": 0.0,
+        "zip_code": 0.0
+      }
+    },
+    "test": {
+      "rows": 499,
+      "cols": 14,
+      "na_counts": {
+        "acre_lot": 0,
+        "bath": 0,
+        "bed": 0,
+        "bed_per_bath": 0,
+        "city": 0,
+        "house_size": 0,
+        "log_house_size": 0,
+        "lot_per_size": 0,
+        "month": 0,
+        "price": 0,
+        "season": 0,
+        "state": 0,
+        "year": 0,
+        "zip_code": 0
+      },
+      "na_pct": {
+        "acre_lot": 0.0,
+        "bath": 0.0,
+        "bed": 0.0,
+        "bed_per_bath": 0.0,
+        "city": 0.0,
+        "house_size": 0.0,
+        "log_house_size": 0.0,
+        "lot_per_size": 0.0,
+        "month": 0.0,
+        "price": 0.0,
+        "season": 0.0,
+        "state": 0.0,
+        "year": 0.0,
+        "zip_code": 0.0
+      }
+    }
+  }
+}

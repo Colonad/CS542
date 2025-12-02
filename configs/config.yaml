@@ -11,13 +11,18 @@ paths:
   out_dir: data/outputs
 
 run:
-  device: auto                   # 'auto' | 'gpu' | 'cpu' (XGB still probes GPU automatically in code)
-  run_name: null                 # if null, auto: YYYY-MM-DD_HHMMSS
-  timestamped_outputs: true      # mirror metrics/preds/models into outputs/run/<stamp>/
-  save_config_snapshot: true     # copy this yaml into the run folder
+  device: auto                   # 'auto' | 'gpu' | 'cpu'
+  run_name: null
+  timestamped_outputs: true
+  save_config_snapshot: true
   random_state: 0
-  n_jobs: -1                     # threads for models that support it
+  n_jobs: -1
   float_precision: 6
+
+  # NEW: fast sweep options
+  fast_sweep: true        # set to false for the full, heavy sweep
+  max_train_rows: 50000   # cap training rows for sweeps (e.g., 30k–50k)
+
 
 # ---------------------------- #
 # Data loading & sanitation
@@ -123,13 +128,10 @@ features:
 # Split protocol (Phase 6)
 # ---------------------------- #
 split:
-  # 3-way temporal split for Phase 6:
-  #   - train: year <= train_max_year
-  #   - val:   year == val_year
-  #   - test:  year >= test_min_year
-  train_max_year: 2022
-  val_year: 2023
-  test_min_year: 2024
+  train_max_year: 2021   # train: ≤ 2021
+  val_year: 2022         # val: == 2022
+  test_min_year: 2023    # test: ≥ 2023  (2023 + 2024 + …)
+
 
   # --- used only if 'sold_date' is missing (rare fallback) ---
   random_fallback:

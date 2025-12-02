@@ -1,0 +1,10 @@
+{
+  "model_family": "xgb",
+  "group_cols": [
+    "state",
+    "zip_code"
+  ],
+  "topk": 20,
+  "min_count": 30,
+  "slices": []
+}

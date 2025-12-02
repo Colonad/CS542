@@ -69,3 +69,4 @@ outputs/**/*
 kaggle.json
 .kaggle/
 data/raw/usa_real_estate.csv
+realtor-data.zip.csv

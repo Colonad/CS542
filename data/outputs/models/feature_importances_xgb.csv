@@ -1,0 +1,14 @@
+group,importance
+city,0.44468948
+state,0.35457465
+zip_code,0.17224033
+bath,0.014355469
+house_size,0.007945282
+log_house_size,0.0042379205
+bed_per_bath,0.0005987499
+season,0.00056189613
+acre_lot,0.00029790652
+lot_per_size,0.00017624014
+year,0.00014226961
+month,9.7636825e-05
+bed,8.212629e-05

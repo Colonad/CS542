@@ -1,0 +1,316 @@
+# ==============================================================================
+# Real Estate Price Prediction — Master Config (Phase 6)
+# ==============================================================================
+
+# ---------------------------- #
+# Paths & run configuration
+# ---------------------------- #
+paths:
+  data_csv: data/raw/usa_real_estate.csv
+  interim_dir: data/interim
+  out_dir: data/outputs
+
+run:
+  device: auto                   # 'auto' | 'gpu' | 'cpu'
+  run_name: null
+  timestamped_outputs: true
+  save_config_snapshot: true
+  random_state: 0
+  n_jobs: -1
+  float_precision: 6
+
+  # NEW: fast sweep options
+  fast_sweep: true        # set to false for the full, heavy sweep
+  max_train_rows: 50000   # cap training rows for sweeps (e.g., 30k–50k)
+
+
+# ---------------------------- #
+# Data loading & sanitation
+# ---------------------------- #
+data:
+  required_columns: ["price", "sold_date"]
+  parse_dates: ["sold_date", "prev_sold_date"]
+  drop_inf: true
+  drop_na_target: true
+
+  # broad guards (do not overfit here; just remove clearly impossible values)
+  filters:
+    price:
+      min: 1000
+      max: 10000000
+    house_size:
+      min: 100             # optional; only applied if column exists
+      max_percentile: 99.9
+    acre_lot:
+      min: 0
+      max_percentile: 99.9
+
+  # domain sanity rules: drop obviously nonsensical rows
+  sanity:
+    enabled: true
+    bed_col: bed
+    bath_col: bath
+    house_size_col: house_size
+    max_bath_to_bed_ratio: 5.0   # drop rows with bath > bed * 5
+    min_house_size: 100.0        # drop rows with house_size <= 100
+
+  export_schema_snapshot: true
+
+# ---------------------------- #
+# Target & transformation
+# ---------------------------- #
+target:
+  name: price
+  log_transform: true              # model log1p(price); inverse with expm1 (plus Duan smearing) for reporting
+
+# ---------------------------- #
+# Feature configuration
+# ---------------------------- #
+features:
+  # IMPORTANT: keep names consistent with feature builders:
+  # - basic_time_feats() adds: year, month, season, property_age (if year_built)
+  # - years_since_prev() adds: years_since_prev_sale
+  # - engineered features defined below
+  # - leakage-safe neighbors add: zip_year_price_median (+ _prev on train/val)
+  numeric:
+    - bed
+    - bath
+    - acre_lot
+    - house_size
+    - year
+    - month
+    - season
+    - years_since_prev_sale
+    - property_age
+    - bed_per_bath
+    - lot_per_size
+    - log_house_size
+    - zip_year_price_median
+    - zip_year_price_median_prev
+  categorical:
+    - city
+    - state
+    - zip_code
+
+  # Automatically derived (no leakage; derived from a single row)
+  derived:
+    enable_basic_time: true        # adds year, month, season, property_age (if year_built)
+    enable_years_since_prev: true  # (sold - prev_sold)/365.25; impute if prev missing
+
+  # Optional engineered features computed row-wise
+  engineered:
+    - name: bed_per_bath
+      expr: "bed / np.clip(bath, 1, None)"
+    - name: lot_per_size
+      expr: "acre_lot / np.clip(house_size, 1, None)"
+    - name: log_house_size
+      expr: "np.log1p(house_size)"
+
+  # Neighborhood/aggregate stats fit on TRAIN ONLY (then merged to val/test)
+  leakage_safe_neighbors:
+    enabled: true
+    group_keys: [zip_code, year]   # must be present in dataframe
+    stats:
+      - kind: median
+        of: price
+        name: zip_year_price_median
+    min_group_size: 50
+    fill_strategy: global_median   # fallback for unseen groups
+
+  # Outlier handling (simple winsorization for selected numeric columns)
+  winsorize:
+    enabled: true
+    columns: [house_size, acre_lot]
+    lower_pct: 0.0
+    upper_pct: 99.0   # cap at 99th percentile
+
+# ---------------------------- #
+# Split protocol (Phase 6)
+# ---------------------------- #
+split:
+  train_max_year: 2021   # train: ≤ 2021
+  val_year: 2022         # val: == 2022
+  test_min_year: 2023    # test: ≥ 2023  (2023 + 2024 + …)
+
+
+  # --- used only if 'sold_date' is missing (rare fallback) ---
+  random_fallback:
+    enabled: true
+    test_size: 0.2
+
+  # (Optional) enforce no cross-property leakage if you have a stable property ID
+  property_id_col: null            # e.g., "prop_id"
+  forbid_property_cross_split: false
+
+  # (Optional) guardrails
+  min_train_rows: 10000            # assert there’s sufficient train data
+  min_val_rows: 100                # ensure at least some validation data
+  min_test_rows: 100               # assert there’s sufficient test data
+
+  # (Optional) pin evaluation geography by ZIP prefix (kept off by default)
+  restrict_test_zip_prefixes: []   # e.g., ["10", "11"]
+
+# ---------------------------- #
+# Cross-validation (optional)
+# ---------------------------- #
+cv:
+  enabled: false
+  kind: time_series               # 'time_series' | 'kfold'
+  n_splits: 3
+  gap: 0                          # gap between train and val windows (months) for time series
+  test_size_months: 6
+
+# ---------------------------- #
+# Baselines
+# ---------------------------- #
+baselines:
+  median_zip_year:
+    enabled: true
+    group_cols: [zip_code, year]
+    min_group_size: 1             # baseline backoff gate; function falls back to zip/year/global
+
+# ---------------------------- #
+# Preprocessing
+# ---------------------------- #
+preprocess:
+  numeric_imputer: median         # 'median' | 'mean' | 'constant'
+  categorical_imputer: most_frequent
+  one_hot:
+    handle_unknown: ignore
+    min_frequency: 50             # group rare categories to keep matrix manageable (int=count or float=prop)
+  scaler: null                    # set to 'standard' for linear models if desired (e.g., Ridge)
+
+# ---------------------------- #
+# Phase 6 — Model sweep (small grid)
+# ---------------------------- #
+sweep:
+  # ---- Ridge (CPU) ----
+  ridge:
+    alpha: [0.5, 1.0, 2.0, 5.0]
+
+  # ---- Random Forest ----
+  # If you enable cuML RF below, avoid max_depth=None; use explicit integers.
+  rf:
+    n_estimators: [400, 800]
+    min_samples_leaf: [1, 2, 4]
+    max_depth: [16, 20, 40]
+
+  # ---- XGBoost ----
+  xgb:
+    enabled: true
+    learning_rate: [0.04, 0.05, 0.06]
+    max_depth: [6, 8, 10]
+    n_estimators: [600, 900, 1200]
+    subsample: [0.8]
+    colsample_bytree: [0.8]
+    # device/tree_method/predictor are injected automatically after GPU probe in code
+
+  # ---- Optional GPU backends toggles (RF via cuML) ----
+  use_cuml:
+    enabled: true    # global toggle for using cuML where supported by the script
+    rf: true         # try to use cuML RandomForestRegressor (GPU) for RF sweep
+    ridge: false     # Ridge stays on CPU
+
+# ---------------------------- #
+# Model registry & params (single-model training scripts)
+# ---------------------------- #
+model:
+  # Choose exactly one of: ridge | random_forest | xgboost
+  kind: random_forest             # Default for single-run trainers
+
+  ridge:
+    alpha: 2.0
+    fit_intercept: true
+    copy_X: true
+    random_state: 0
+
+  random_forest:
+    n_estimators: 600
+    max_depth: null
+    min_samples_split: 2
+    min_samples_leaf: 2
+    max_features: "sqrt"
+    bootstrap: true
+    n_jobs: -1
+    random_state: 0
+
+  xgboost:
+    enabled: true                 # set false if xgboost is not available
+    n_estimators: 1200
+    max_depth: 8
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_lambda: 1.0
+    reg_alpha: 0.0
+    tree_method: auto             # training code auto-switches to GPU if available
+    n_jobs: -1
+    random_state: 0
+    early_stopping:
+      enabled: false              # enable if your trainer uses a 3-way split with validation
+
+# ---------------------------- #
+# Training run behavior
+# ---------------------------- #
+train:
+  save_pipeline: true
+  save_feature_importances: true
+  model_filename: price_model.pkl
+
+# ---------------------------- #
+# Evaluation & reporting
+# ---------------------------- #
+eval:
+  metrics: [MAE, RMSE, R2]
+  report_currency: USD
+
+  # Diagnostic slices (compute MAE per group)
+  slices:
+    enabled: true
+    group_cols: [state, zip_code]
+    topk: 20
+    min_count: 30
+
+  # Plots saved to outputs/figures/
+  plots:
+    pred_vs_actual: true
+    residuals_vs_price: true
+    feature_importance: true
+    calibration_curve: true
+
+  calibration:
+    bins: 20     # deciles=10, ventiles=20, etc.
+
+  # Export files (used by scripts; safe to keep on)
+  exports:
+    metrics_json: true
+    summary_csv: true
+    preds_csv: true
+    slices_json: true
+
+# ---------------------------- #
+# Interpretability
+# ---------------------------- #
+interpretability:
+  permutation_importance:
+    enabled: true
+    n_repeats: 5
+    subsample_rows: 20000
+  shap:
+    enabled: false                # enable only if you install shap; can be slow
+    sample_rows: 5000
+
+# ---------------------------- #
+# Logging
+# ---------------------------- #
+logging:
+  level: INFO
+  log_to_file: false
+  file: null
+
+# ---------------------------- #
+# Reproducibility/metadata
+# ---------------------------- #
+repro:
+  capture_git_commit: true        # if repo is a git repo, include HEAD sha in metrics.json
+  capture_data_hash: true         # sha256 of raw CSV
