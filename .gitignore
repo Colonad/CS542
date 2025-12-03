@@ -15,7 +15,6 @@ dist/
 # Virtual environments
 .venv/
 venv/
-env/
 .conda/
 conda-env/
 pip-wheel-metadata/
@@ -50,7 +49,7 @@ outputs/**/*
 !outputs/preds/.gitkeep
 !outputs/figures/.gitkeep
 
-# Allow small README stubs if you added them
+ADME stubs if you added them# Allow small RE
 !outputs/metrics/README.md
 !outputs/models/README.md
 !outputs/preds/README.md
